@@ -56,7 +56,20 @@ function loadAlerts(): AccidentAlert[] {
 
 function saveAlerts(alerts: AccidentAlert[]) {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(alerts));
+  try {
+    // Limit to most recent 20 alerts to prevent localStorage overflow (base64 images are large)
+    const limitedAlerts = alerts.slice(0, 20);
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(limitedAlerts));
+  } catch (err) {
+    console.error("Failed to save alerts to localStorage (likely full):", err);
+    // If full, try saving even fewer
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(alerts.slice(0, 5)));
+    } catch (e) {
+      console.warn("localStorage critically full, clearing alerts.");
+      window.localStorage.removeItem(STORAGE_KEY);
+    }
+  }
 }
 
 const emitter = new EventTarget();
@@ -87,10 +100,12 @@ export function subscribeAccidentAlerts(onChange: (alerts: AccidentAlert[]) => v
 }
 
 export function publishAccidentAlert(alert: AccidentAlert) {
+  console.log("lib: publishAccidentAlert called", alert.id);
   const alerts = loadAlerts();
   const next = [alert, ...alerts];
   saveAlerts(next);
   emitter.dispatchEvent(new Event(EVENT_NAME));
+  console.log("lib: update event dispatched");
 }
 
 export function markAlertNotNew(alertId: string) {

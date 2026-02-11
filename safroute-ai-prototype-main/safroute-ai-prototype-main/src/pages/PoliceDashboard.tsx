@@ -51,12 +51,13 @@ const PoliceDashboard = () => {
   // Convert stored alerts to display format
   const accidents = useMemo(() => {
     return storedAlerts.map((a) => ({
-      id: a.id,
+      id: a.id.replace("acc-", "").slice(-6),
       severity: a.severity,
       vehicles: a.vehicles,
       roadType: a.roadType,
       time: new Date(a.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       date: new Date(a.createdAt).toISOString().slice(0, 10),
+      rawTime: new Date(a.createdAt).getTime(),
       trafficStatus: a.trafficStatus,
       lat: a.lat,
       lng: a.lng,
@@ -69,12 +70,9 @@ const PoliceDashboard = () => {
     }));
   }, [storedAlerts]);
 
-  // Sort accidents by priority (Critical first)
+  // Sort accidents by time (newest first)
   const sortedAccidents = useMemo(() => {
-    return [...accidents].sort((a, b) => {
-      const severityOrder = { Critical: 4, High: 3, Medium: 2, Low: 1 };
-      return severityOrder[b.severity] - severityOrder[a.severity];
-    });
+    return [...accidents].sort((a, b) => b.rawTime - a.rawTime);
   }, [accidents]);
 
   const handleStatusChange = (alertId: string, status: "Pending" | "Under Investigation" | "Completed") => {
@@ -187,9 +185,8 @@ const PoliceDashboard = () => {
             sortedAccidents.map((accident) => (
               <Card
                 key={accident.id}
-                className={`relative transition-all hover:shadow-lg ${
-                  accident.isNew ? "border-l-4 border-l-red-600" : ""
-                }`}
+                className={`relative transition-all hover:shadow-lg ${accident.isNew ? "border-l-4 border-l-red-600" : ""
+                  }`}
               >
                 {accident.isNew && (
                   <Badge className="absolute top-2 right-2 bg-red-600 animate-pulse z-10">
@@ -207,8 +204,8 @@ const PoliceDashboard = () => {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {/* Show photo only for newest alert */}
-                  {accident.photoDataUrl && accident.isNew && (
+                  {/* Show photo for alert if available */}
+                  {accident.photoDataUrl && (
                     <div className="rounded-lg overflow-hidden border bg-muted">
                       <img
                         src={accident.photoDataUrl}
@@ -277,8 +274,8 @@ const PoliceDashboard = () => {
                         accident.investigationStatus === "Completed"
                           ? "default"
                           : accident.investigationStatus === "Under Investigation"
-                          ? "secondary"
-                          : "outline"
+                            ? "secondary"
+                            : "outline"
                       }
                     >
                       {accident.investigationStatus}

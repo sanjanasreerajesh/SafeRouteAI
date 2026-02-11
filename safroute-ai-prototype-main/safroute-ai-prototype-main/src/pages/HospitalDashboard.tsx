@@ -31,11 +31,12 @@ const HospitalDashboard = () => {
   // Convert stored alerts to display format
   const accidents = useMemo(() => {
     return storedAlerts.map((a) => ({
-      id: Number(a.id.replace(/\D/g, "").slice(-6)) || Math.floor(Math.random() * 999999),
+      id: a.id.replace("acc-", "").slice(-6),
       severity: a.severity,
       injured: a.injured,
       time: new Date(a.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       date: new Date(a.createdAt).toISOString().slice(0, 10),
+      rawTime: new Date(a.createdAt).getTime(),
       status: a.hospitalStatus,
       lat: a.lat,
       lng: a.lng,
@@ -47,14 +48,14 @@ const HospitalDashboard = () => {
     }));
   }, [storedAlerts]);
 
-  // Sort accidents by priority (Critical first, then by time)
+  // Sort accidents: Priority 1: Newest first, Priority 2: Criticality
   const sortedAccidents = useMemo(() => {
     return [...accidents].sort((a, b) => {
-      const severityOrder = { Critical: 4, High: 3, Medium: 2, Low: 1 };
-      const severityDiff = severityOrder[b.severity] - severityOrder[a.severity];
-      if (severityDiff !== 0) return severityDiff;
-      // If same severity, newer accidents first
-      return b.new ? 1 : -1;
+      // Always put actual new ones at top
+      if (a.new && !b.new) return -1;
+      if (!a.new && b.new) return 1;
+      // Then sort by time (newest first)
+      return b.rawTime - a.rawTime;
     });
   }, [accidents]);
 
@@ -157,9 +158,8 @@ const HospitalDashboard = () => {
             sortedAccidents.map((accident) => (
               <Card
                 key={accident.id}
-                className={`relative transition-all hover:shadow-lg ${
-                  accident.new ? "border-l-4 border-l-red-600" : ""
-                }`}
+                className={`relative transition-all hover:shadow-lg ${accident.new ? "border-l-4 border-l-red-600" : ""
+                  }`}
               >
                 {accident.new && (
                   <Badge className="absolute top-2 right-2 bg-red-600 animate-pulse z-10">
@@ -177,8 +177,8 @@ const HospitalDashboard = () => {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {/* Show photo only for newest alert */}
-                  {accident.photoDataUrl && accident.new && (
+                  {/* Show photo for alert if available */}
+                  {accident.photoDataUrl && (
                     <div className="rounded-lg overflow-hidden border bg-muted">
                       <img
                         src={accident.photoDataUrl}

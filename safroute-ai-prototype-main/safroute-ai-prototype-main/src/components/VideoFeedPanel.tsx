@@ -5,15 +5,11 @@ import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { InferenceSession, Tensor, env } from 'onnxruntime-web';
+import { useToast } from "@/components/ui/use-toast";
+import { publishAccidentAlert } from "@/lib/accidentAlerts";
 
-// Configure ONNX runtime to use CDN for wasm files (more reliable)
-// Set wasm paths before any ONNX operations
-if (typeof window !== 'undefined') {
-  env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.2/dist/';
-  // Also allow blob URLs for dynamic imports
-  env.wasm.numThreads = 1; // Use single thread to avoid worker issues
-}
+// WebSocket configuration
+const WS_URL = "ws://127.0.0.1:8000/ws";
 
 interface BoundingBox {
   x: number;
@@ -41,7 +37,14 @@ const iou = (box1: BoundingBox, box2: BoundingBox): number => {
 
 const nms = (boxes: BoundingBox[], iouThreshold: number = 0.5): BoundingBox[] => {
   if (boxes.length === 0) return [];
-  const sortedBoxes = [...boxes].sort((a, b) => b.confidence - a.confidence);
+  // Sort boxes by confidence
+  let sortedBoxes = [...boxes].sort((a, b) => b.confidence - a.confidence);
+
+  // Performance optimization: Cap the number of boxes to process
+  if (sortedBoxes.length > 500) {
+    sortedBoxes = sortedBoxes.slice(0, 500);
+  }
+
   const selectedBoxes: BoundingBox[] = [];
 
   while (sortedBoxes.length > 0) {
@@ -52,24 +55,30 @@ const nms = (boxes: BoundingBox[], iouThreshold: number = 0.5): BoundingBox[] =>
         sortedBoxes.splice(i, 1);
       }
     }
+    // Limit total selected boxes to prevent UI lag
+    if (selectedBoxes.length > 50) break;
   }
   return selectedBoxes;
 };
 
 // -------------------------------------------------------------------------------
 
+const MAX_HISTORY = 5;
+const CONSENSUS_THRESHOLD = 3; // Must detect in 3/5 frames to alert
+
 const VideoFeedPanel = () => {
+  const { toast } = useToast();
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [uploadedVideo, setUploadedVideo] = useState<string | null>(null);
   const [isDetecting, setIsDetecting] = useState(false);
   const [detectionResult, setDetectionResult] = useState<string | null>(null);
-  const [session, setSession] = useState<InferenceSession | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [detections, setDetections] = useState<BoundingBox[]>([]);
   const [originalImageSize, setOriginalImageSize] = useState<{ width: number; height: number } | null>(null);
 
   // Detection Threshold (Sensitivity)
-  const [threshold, setThreshold] = useState(0.50);
+  const [threshold, setThreshold] = useState(0.55);
 
   // State for coordinate mode
   const [coordMode, setCoordMode] = useState<'auto' | 'norm' | 'pixel'>('auto');
@@ -92,46 +101,199 @@ const VideoFeedPanel = () => {
   const [isLiveDetecting, setIsLiveDetecting] = useState(false);
   const requestRef = useRef<number>();
   const isProcessingFrame = useRef(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const lastFrameTimeRef = useRef<number>(0);
+  const detectionHistory = useRef<BoundingBox[][]>([]);
+  const boxPersistence = useRef<{ box: BoundingBox, count: number }[]>([]);
+  const lastAlertTimeRef = useRef<number>(0);
+  const lastCapturedImageRef = useRef<string | null>(null);
 
-  // Initialize ONNX session
+  // Initialize WebSocket connection
   useEffect(() => {
-    const initModel = async () => {
+    let retryCount = 0;
+    const connectWS = () => {
+      console.log("WebSocket: Initializing connection...");
       setIsModelLoading(true);
-      setDebugInfo("Initializing model...");
+
+      // Determine protocol and host
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const targetUrl = `${protocol}//localhost:8000/ws`;
+
+      console.log(`WebSocket: Target URL is ${targetUrl}`);
+      setDebugInfo(`Connecting to ${targetUrl}...`);
+
       try {
-        let modelSession: InferenceSession | null = null;
+        const ws = new WebSocket(targetUrl);
+        wsRef.current = ws;
 
-        // Try default backend first
-        try {
-          console.log('Loading model with default settings...');
-          modelSession = await InferenceSession.create('/best.onnx', { executionProviders: ['wasm'] });
-        } catch (err) {
-          console.error('Default load failed:', err);
-        }
+        ws.onopen = () => {
+          console.log("WebSocket: Connection established!");
+          setWsConnected(true);
+          setIsModelLoading(false);
+          setDebugInfo("Backend Connected");
+          retryCount = 0;
+        };
 
-        if (modelSession) {
-          setSession(modelSession);
-          setDebugInfo(`Model Loaded! Inputs: ${modelSession.inputNames.join(', ')} -> Outputs: ${modelSession.outputNames.join(', ')} `);
-        } else {
-          throw new Error('Failed to load model');
-        }
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        setDetectionResult(`Model Loading Failed: ${msg} `);
-        setDebugInfo(`Error: ${msg} `);
-      } finally {
-        setIsModelLoading(false);
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.detections) {
+              console.log("WS Response received:", data.detections.length, "detections");
+              const media = imageRef.current || videoRef.current;
+              const isImageSource = !!imageRef.current;
+              const naturalWidth = media instanceof HTMLImageElement ? media.naturalWidth : (media?.videoWidth || 640);
+              const naturalHeight = media instanceof HTMLImageElement ? media.naturalHeight : (media?.videoHeight || 640);
+
+              const rawFinal = data.detections
+                .map((d: any) => ({
+                  ...d,
+                  x: d.x,
+                  y: d.y,
+                  width: d.width,
+                  height: d.height,
+                  label: 'Accident'
+                }));
+
+              // Match current detections with persistent boxes for smoothing
+              const nextPersistence: { box: BoundingBox, count: number }[] = [];
+              rawFinal.forEach((newBox: BoundingBox) => {
+                let found = false;
+                for (let p of boxPersistence.current) {
+                  const intersection = iou(p.box, newBox);
+                  if (intersection > 0.5) {
+                    nextPersistence.push({ box: newBox, count: Math.min(p.count + 1, 10) });
+                    found = true;
+                    break;
+                  }
+                }
+                if (!found) nextPersistence.push({ box: newBox, count: 1 });
+              });
+
+              boxPersistence.current = nextPersistence;
+              // For images, we show boxes immediately (count >= 1). For video, we wait for stability (count >= 2).
+              const stableBoxes = boxPersistence.current.filter(p => isImageSource ? p.count >= 1 : p.count >= 2).map(p => p.box);
+
+              setDetections(stableBoxes);
+
+              // Trigger on stable boxes (smoothing) OR raw detections above user threshold
+              const alertBoxes = stableBoxes.length > 0 ? stableBoxes : rawFinal.filter((d: BoundingBox) => d.confidence >= threshold);
+
+              console.log(`Detections received: ${rawFinal.length}, Stable: ${stableBoxes.length}, Alert candidates: ${alertBoxes.length}`);
+
+              if (alertBoxes.length > 0) {
+                const maxConf = Math.max(...alertBoxes.map(d => d.confidence));
+                setDetectionResult(`Accident Detected! ${(maxConf * 100).toFixed(0)}%`);
+                console.log(`Alert condition met. Max confidence: ${maxConf}`);
+
+                const now = Date.now();
+                // Cooldown: 5 seconds for testing/responsiveness
+                if (now - lastAlertTimeRef.current > 5000) {
+                  lastAlertTimeRef.current = now;
+
+                  // Create annotated image with bounding boxes for the alert
+                  let annotatedDataUrl = lastCapturedImageRef.current;
+                  const media = imageRef.current || videoRef.current;
+
+                  console.log(`Attempting alert. Media: ${!!media}, ImageRef: ${!!lastCapturedImageRef.current}`);
+
+                  if (media && lastCapturedImageRef.current) {
+                    const tempCanvas = document.createElement('canvas');
+                    const img = new Image();
+                    img.src = lastCapturedImageRef.current;
+                    img.onload = () => {
+                      console.log("Alert image loaded, starting annotation...");
+                      tempCanvas.width = img.width;
+                      tempCanvas.height = img.height;
+                      const tctx = tempCanvas.getContext('2d');
+                      if (tctx) {
+                        tctx.drawImage(img, 0, 0);
+                        tctx.strokeStyle = '#ff0000';
+                        tctx.lineWidth = 10;
+                        alertBoxes.forEach((box: BoundingBox) => {
+                          tctx.strokeRect(box.x, box.y, box.width, box.height);
+                          tctx.fillStyle = '#ff0000';
+                          tctx.font = 'bold 40px Arial';
+                          tctx.fillText(`Accident ${(box.confidence * 100).toFixed(0)}%`, box.x, box.y - 10);
+                        });
+                        annotatedDataUrl = tempCanvas.toDataURL('image/jpeg', 0.7);
+                      }
+
+                      console.log("Publishing alert to dashboards...");
+                      publishAccidentAlert({
+                        id: `acc-${now}`,
+                        createdAt: new Date().toISOString(),
+                        severity: maxConf > 0.8 ? "Critical" : (maxConf > 0.7 ? "High" : "Medium"),
+                        confidence: maxConf,
+                        lat: 13.0827,
+                        lng: 80.2707,
+                        location: "Anna Salai, Chennai",
+                        assignedHospital: "Apollo Hospital",
+                        assignedPoliceStation: "Teynampet Police Station",
+                        injured: Math.floor(Math.random() * 3) + 1,
+                        vehicles: Math.floor(Math.random() * 2) + 1,
+                        roadType: "Highway",
+                        photoDataUrl: annotatedDataUrl || undefined,
+                        source: imageRef.current ? "image" : "video",
+                        hospitalStatus: "Pending",
+                        trafficStatus: "Road Blocked",
+                        investigationStatus: "Pending",
+                        isNew: true
+                      });
+
+                      toast({
+                        title: "🚨 Accident Alert Sent",
+                        description: "Hospital and Police dashboards have been notified.",
+                        variant: "destructive",
+                      });
+                      console.log("Alert published successfully.");
+                    };
+                    img.onerror = (e) => {
+                      console.error("Failed to load alert image for annotation", e);
+                    };
+                  } else {
+                    console.warn("Skipping alert: Media or Captured Image missing.");
+                  }
+                } else {
+                  console.log(`Alert skipped: Cooldown active (${Date.now() - lastAlertTimeRef.current}ms since last)`);
+                }
+              } else {
+                setDetectionResult("Monitoring Feed...");
+              }
+            }
+          } catch (err) {
+            console.error("Parse Error:", err);
+          }
+        };
+
+        ws.onclose = (event) => {
+          setWsConnected(false);
+          setIsModelLoading(false);
+          if (!event.wasClean) {
+            setDebugInfo(`Err: Connection Lost (Code: ${event.code})`);
+          } else {
+            setDebugInfo("Backend Disconnected");
+          }
+          retryCount++;
+          setTimeout(connectWS, 3000);
+        };
+
+        ws.onerror = (err) => {
+          console.error("WebSocket Error Detected:", err);
+          setDebugInfo(`Connection Failed. check browser console.`);
+        };
+      } catch (e) {
+        console.error("WebSocket Construction Failed:", e);
+        setDebugInfo("WS init failed.");
       }
     };
-    initModel();
-  }, []);
 
-  // NEW: Effect to draw whenever detections change
-  useEffect(() => {
-    if (detections.length >= 0) {
-      requestAnimationFrame(() => drawBoundingBoxes());
-    }
-  }, [detections, coordMode]);
+    // Small delay to ensure component is settled
+    const timer = setTimeout(connectWS, 1000);
+    return () => {
+      clearTimeout(timer);
+      wsRef.current?.close();
+    };
+  }, []);
 
   // Use existing drawBoundingBoxes logic...
   const drawBoundingBoxes = useCallback(() => {
@@ -205,7 +367,7 @@ const VideoFeedPanel = () => {
       ctx.fillStyle = 'rgba(37, 99, 235, 0.05)';
       ctx.fillRect(x, y, width, height);
 
-      const labelText = `Accident ${(detection.confidence * 100).toFixed(1)}% `;
+      const labelText = `${detection.label} ${(detection.confidence * 100).toFixed(0)}%`;
       ctx.font = 'bold 16px Arial, sans-serif';
       const textMetrics = ctx.measureText(labelText);
       const textWidth = textMetrics.width;
@@ -223,256 +385,82 @@ const VideoFeedPanel = () => {
     });
   }, [detections]);
 
-  // Handle resizing/redrawing
+  // Consolidate drawing effects: draw whenever detections or coordinate mode change
   useEffect(() => {
-    if (!uploadedImage) {
-      const overlayCanvas = overlayCanvasRef.current;
-      if (overlayCanvas) {
-        const ctx = overlayCanvas.getContext('2d');
-        if (ctx) ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-      }
-      return;
+    const handleResize = () => requestAnimationFrame(() => drawBoundingBoxes());
+    window.addEventListener('resize', handleResize);
+
+    if (detections.length >= 0) {
+      requestAnimationFrame(() => drawBoundingBoxes());
     }
-    const image = imageRef.current;
-    if (image) {
-      if (image.complete && image.naturalWidth > 0) {
-        setTimeout(() => drawBoundingBoxes(), 200);
-      } else {
-        image.addEventListener('load', () => setTimeout(() => drawBoundingBoxes(), 200));
-      }
-    }
-  }, [uploadedImage, detections, drawBoundingBoxes]);
+
+    return () => window.removeEventListener('resize', handleResize);
+  }, [detections, coordMode, drawBoundingBoxes, uploadedImage, uploadedVideo]);
+
+  // Removed redundant redrawing effect
 
   // Processing logic
-  const processFrame = async (
+  const processFrame = useCallback(async (
     sourceCanvas: HTMLCanvasElement,
-    width: number,
-    height: number,
-    sourceName: string,
-    letterbox?: { scale: number, padX: number, padY: number }
+    sourceName: string
   ) => {
     try {
-      if (!session) {
-        setDebugInfo("Error: Session not initialized");
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
         return;
       }
 
-      const ctx = sourceCanvas.getContext('2d');
-      if (!ctx) {
-        setDebugInfo("Error: No 2D context");
-        return;
-      }
-
-      const imageData = ctx.getImageData(0, 0, width, height);
-      const { data } = imageData;
-      const input = new Float32Array(3 * width * height);
-
-      for (let i = 0; i < data.length; i += 4) {
-        const pixelIndex = i / 4;
-        input[pixelIndex] = data[i] / 255.0; // R
-        input[width * height + pixelIndex] = data[i + 1] / 255.0; // G
-        input[2 * width * height + pixelIndex] = data[i + 2] / 255.0; // B
-      }
-
-      const tensor = new Tensor('float32', input, [1, 3, height, width]);
-      const inputName = session.inputNames[0];
-
-      const start = performance.now();
-      let results;
-      try {
-        results = await session.run({ [inputName]: tensor });
-      } catch (runErr) {
-        const errMsg = runErr instanceof Error ? runErr.message : String(runErr);
-        setDebugInfo(`Inference Error: ${errMsg} `);
-        console.error(runErr);
-        return;
-      }
-      const end = performance.now();
-
-      // Check outputs
-      if (!results || Object.keys(results).length === 0) {
-        setDebugInfo("Error: No output from model");
-        return;
-      }
-
-      const outputKey = Object.keys(results)[0];
-      const output = results[outputKey];
-      const outputData = output.data as Float32Array;
-      const outputDims = output.dims;
-
-      // DEBUG: Calculate Input/Output Stats
-      let maxInput = 0;
-      for (let i = 0; i < input.length; i += 100) if (input[i] > maxInput) maxInput = input[i];
-
-      let maxOutput = 0;
-      let minOutput = 0;
-      for (let i = 0; i < outputData.length; i++) {
-        const val = outputData[i];
-        if (val > maxOutput) maxOutput = val;
-        if (val < minOutput) minOutput = val;
-      }
-
-      // ... (rest of the logic remains similar but wrapped)
-      // To save tokens, I will re-inject the previous logic here, but with safety.
-
-      let newDetections: BoundingBox[] = [];
-      let maxConf = 0;
-      let stats = { maxObj: 0, maxCls: 0, maxMult: 0, bestAnchorIndex: -1 };
-
-      const dim1 = outputDims[1];
-      const dim2 = outputDims[2];
-
-      let numAnchors = 0;
-      let numFeatures = 0;
-      let isAnchorFirst = false;
-
-      if (dim1 > dim2) {
-        numAnchors = dim1;
-        numFeatures = dim2;
-        isAnchorFirst = true;
-      } else {
-        numFeatures = dim1;
-        numAnchors = dim2;
-        isAnchorFirst = false;
-      }
-
-      let overallMaxProb = 0;
-      for (let i = 0; i < numAnchors; i++) {
-        let cx, cy, w, h, confidence;
-        let isAccidentDominant = true;
-
-        if (isAnchorFirst) {
-          const offset = i * numFeatures;
-          cx = outputData[offset + 0];
-          cy = outputData[offset + 1];
-          w = outputData[offset + 2];
-          h = outputData[offset + 3];
-
-          if (numFeatures === 5) {
-            confidence = outputData[offset + 4];
-          } else {
-            const objConf = outputData[offset + 4];
-            const cls0Conf = outputData[offset + 5];
-            confidence = objConf * cls0Conf;
-            for (let c = 1; c < Math.min(numFeatures - 5, 5); c++) {
-              if (outputData[offset + 5 + c] > cls0Conf) { isAccidentDominant = false; break; }
-            }
-          }
-        } else {
-          cx = outputData[0 * numAnchors + i];
-          cy = outputData[1 * numAnchors + i];
-          w = outputData[2 * numAnchors + i];
-          h = outputData[3 * numAnchors + i];
-
-          if (numFeatures === 5) {
-            confidence = outputData[4 * numAnchors + i];
-          } else {
-            const objConf = outputData[4 * numAnchors + i];
-            const cls0Conf = outputData[5 * numAnchors + i];
-            confidence = objConf * cls0Conf;
-            for (let c = 1; c < Math.min(numFeatures - 5, 5); c++) {
-              if (outputData[(5 + c) * numAnchors + i] > cls0Conf) { isAccidentDominant = false; break; }
-            }
-          }
-        }
-
-        if (confidence > overallMaxProb) overallMaxProb = confidence;
-
-        if (confidence > threshold && isAccidentDominant) {
-          let finalX, finalY, finalW, finalH;
-          if (letterbox) {
-            finalX = (cx - letterbox.padX) / letterbox.scale;
-            finalY = (cy - letterbox.padY) / letterbox.scale;
-            finalW = w / letterbox.scale;
-            finalH = h / letterbox.scale;
-          } else {
-            const imgWidth = sourceName === 'video' ? videoRef.current!.videoWidth : imageRef.current!.naturalWidth;
-            const imgHeight = sourceName === 'video' ? videoRef.current!.videoHeight : imageRef.current!.naturalHeight;
-            const scaleX = imgWidth / width;
-            const scaleY = imgHeight / height;
-            finalX = cx * scaleX;
-            finalY = cy * scaleY;
-            finalW = w * scaleX;
-            finalH = h * scaleY;
-          }
-
-          newDetections.push({
-            x: finalX - finalW / 2,
-            y: finalY - finalH / 2,
-            width: finalW,
-            height: finalH,
-            confidence: confidence,
-            label: 'Accident'
-          });
-        }
-      }
-
-      const rawFinal = nms(newDetections, 0.25); // TIGHTER NMS
-
-      if (sourceName === 'video') {
-        detectionHistory.current.push(rawFinal);
-        if (detectionHistory.current.length > MAX_HISTORY) detectionHistory.current.shift();
-
-        const activeFrames = detectionHistory.current.filter(f => f.length > 0).length;
-
-        if (activeFrames >= 3) { // Require 3 stable frames
-          setDetections(rawFinal);
-          if (rawFinal.length > 0) {
-            setDetectionResult(`Accident Detected! ${(rawFinal[0].confidence * 100).toFixed(0)}%`);
-          }
-        } else {
-          setDetections([]);
-          setDetectionResult(activeFrames > 0 ? "Analyzing..." : `No Accident (Max:${(overallMaxProb * 100).toFixed(0)}%)`);
-        }
-        setDebugInfo(`Feat:${numFeatures} | Match:${activeFrames}/${MAX_HISTORY} | Raw:${newDetections.length}`);
-      } else {
-        setDetections(rawFinal);
-        setDetectionResult(rawFinal.length > 0 ? `Accident Detected! ${(rawFinal[0].confidence * 100).toFixed(0)}%` : "No Accident Detected");
-        setDebugInfo(`Image Mode | Count: ${rawFinal.length}`);
-      }
+      // Send to backend via WS with current sensitivity threshold
+      const dataUrl = sourceCanvas.toDataURL('image/jpeg', 0.8);
+      lastCapturedImageRef.current = dataUrl;
+      wsRef.current.send(JSON.stringify({
+        image: dataUrl,
+        threshold: threshold
+      }));
 
     } catch (err) {
-      console.error(err);
+      console.error("WebSocket Send Error:", err);
     }
-  };
+  }, [threshold]);
 
   const detectFrame = useCallback(async () => {
+    if (!isLiveDetecting) return;
+
     const video = videoRef.current;
-    if (!video || video.paused || video.ended || !isLiveDetecting || !session || isProcessingFrame.current) {
-      if (video && !video.paused && isLiveDetecting) requestRef.current = requestAnimationFrame(detectFrame);
-      return;
-    }
-    isProcessingFrame.current = true;
-    try {
-      const canvas = document.createElement('canvas');
-      canvas.width = 640;
-      canvas.height = 640;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        // Letterboxing: Fill background with black
-        ctx.fillStyle = 'black';
-        ctx.fillRect(0, 0, 640, 640);
+    const now = Date.now();
 
-        const vWidth = video.videoWidth;
-        const vHeight = video.videoHeight;
-        const scale = Math.min(640 / vWidth, 640 / vHeight);
-        const newW = vWidth * scale;
-        const newH = vHeight * scale;
-        const padX = (640 - newW) / 2;
-        const padY = (640 - newH) / 2;
+    // Check if we can/should process this frame
+    const shouldProcess =
+      video &&
+      !video.paused &&
+      !video.ended &&
+      video.readyState >= 2 &&
+      wsConnected &&
+      !isProcessingFrame.current &&
+      (now - lastFrameTimeRef.current >= 200);
 
-        ctx.drawImage(video, padX, padY, newW, newH);
-
-        // Pass letterbox info to processFrame
-        await processFrame(canvas, 640, 640, 'video', { scale, padX, padY });
+    if (shouldProcess) {
+      lastFrameTimeRef.current = now;
+      isProcessingFrame.current = true;
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          await processFrame(canvas, 'video');
+        }
+      } catch (e) {
+        console.error("Frame processing error:", e);
+      } finally {
+        isProcessingFrame.current = false;
       }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      isProcessingFrame.current = false;
-      if (isLiveDetecting) requestRef.current = requestAnimationFrame(detectFrame);
     }
-  }, [isLiveDetecting, session]);
+
+    // Always reschedule if still detecting, even if video is paused
+    // This ensures detection kicks in as soon as someone hits play
+    requestRef.current = requestAnimationFrame(detectFrame);
+  }, [isLiveDetecting, wsConnected, processFrame]);
 
   useEffect(() => {
     if (isLiveDetecting) {
@@ -485,39 +473,22 @@ const VideoFeedPanel = () => {
     };
   }, [isLiveDetecting, detectFrame]);
 
-  // Auto-draw when detections change
-  useEffect(() => {
-    if (detections.length >= 0) {
-      requestAnimationFrame(() => drawBoundingBoxes());
-    }
-  }, [detections]);
+  // Consolidant draw effect (already handled above)
 
   const detectAccident = async () => {
-    if (!uploadedImage || !session) return;
+    if (!uploadedImage || !wsConnected) return;
     setIsDetecting(true);
     const img = new Image();
     img.src = uploadedImage;
     await new Promise(r => img.onload = r);
 
     const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 640;
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
     const ctx = canvas.getContext('2d');
     if (ctx) {
-      // Letterboxing for images
-      ctx.fillStyle = 'black';
-      ctx.fillRect(0, 0, 640, 640);
-
-      const iWidth = img.naturalWidth;
-      const iHeight = img.naturalHeight;
-      const scale = Math.min(640 / iWidth, 640 / iHeight);
-      const newW = iWidth * scale;
-      const newH = iHeight * scale;
-      const padX = (640 - newW) / 2;
-      const padY = (640 - newH) / 2;
-
-      ctx.drawImage(img, padX, padY, newW, newH);
-      await processFrame(canvas, 640, 640, 'image', { scale, padX, padY });
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      await processFrame(canvas, 'image');
     }
     setIsDetecting(false);
   };
@@ -533,6 +504,8 @@ const VideoFeedPanel = () => {
       setUploadedImage(null);
       setDetectionResult(null);
       setDetections([]);
+      boxPersistence.current = [];
+      detectionHistory.current = [];
     } else {
       const reader = new FileReader();
       reader.onload = (e) => {
@@ -540,19 +513,31 @@ const VideoFeedPanel = () => {
         setUploadedVideo(null);
         setDetectionResult(null);
         setDetections([]);
+        boxPersistence.current = [];
+        detectionHistory.current = [];
       }
       reader.readAsDataURL(file);
     }
   };
 
-  const toggleLiveDetection = () => {
+  const toggleLiveDetection = async () => {
     const newState = !isLiveDetecting;
     setIsLiveDetecting(newState);
 
     if (newState) {
       setDetectionResult("Live Detection Enabled");
       if (videoRef.current) {
-        videoRef.current.play().catch(e => console.error("Auto-play failed:", e));
+        // Reset to beginning if at the end
+        if (videoRef.current.ended) {
+          videoRef.current.currentTime = 0;
+        }
+        try {
+          await videoRef.current.play();
+        } catch (e) {
+          console.error("Manual playback trigger failed:", e);
+          // If play() fails here, we still have isLiveDetecting=true,
+          // so it will start as soon as the user clicks the video's own play button
+        }
       }
     } else {
       setDetectionResult(null);
@@ -577,12 +562,12 @@ const VideoFeedPanel = () => {
             <Upload className="h-4 w-4 mr-2" /> Upload Media
           </Button>
           {uploadedImage && (
-            <Button onClick={detectAccident} disabled={isDetecting || !session} className="flex-1">
+            <Button onClick={detectAccident} disabled={isDetecting || !wsConnected} className="flex-1">
               {isDetecting ? "Detecting..." : <><Play className="h-4 w-4 mr-2" /> Verify Image</>}
             </Button>
           )}
           {uploadedVideo && (
-            <Button onClick={toggleLiveDetection} disabled={!session} variant={isLiveDetecting ? "destructive" : "default"} className="flex-1">
+            <Button onClick={toggleLiveDetection} disabled={!wsConnected} variant={isLiveDetecting ? "destructive" : "default"} className="flex-1">
               {isLiveDetecting ? "Stop Live" : "Start Live"}
             </Button>
           )}
@@ -603,14 +588,14 @@ const VideoFeedPanel = () => {
             value={[threshold]}
             onValueChange={(val) => setThreshold(val[0])}
             min={0.10}
-            max={0.90}
+            max={0.95}
             step={0.05}
           />
         </div>
 
         {detectionResult && (
           <Badge variant={detectionResult.includes('Detected') && !detectionResult.includes('No') ? 'destructive' : 'secondary'} className="w-full justify-center py-2 text-md">
-            {detectionResult}
+            {detectionResult} {detections.length > 0 ? `(${detections.length} boxes)` : ''}
           </Badge>
         )}
 
@@ -621,9 +606,14 @@ const VideoFeedPanel = () => {
               ref={videoRef}
               src={uploadedVideo}
               controls
+              muted
+              playsInline
               className="w-full h-full object-contain"
               onPlay={() => setIsLiveDetecting(true)}
-              onPause={() => setIsLiveDetecting(false)}
+              onPause={() => {
+                // Only stop if the user explicitly paused via video controls
+                // and we aren't in the middle of a reset
+              }}
               onEnded={() => setIsLiveDetecting(false)}
             />
           )}
@@ -644,3 +634,4 @@ const VideoFeedPanel = () => {
 };
 
 export default VideoFeedPanel;
+
