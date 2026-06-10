@@ -7,6 +7,17 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
 import { publishAccidentAlert } from "@/lib/accidentAlerts";
+import { getLocationForVideo, recommendHospital } from "@/lib/emergencyResponse";
+
+export interface AccidentDetectionInfo {
+  videoFilename: string;
+  severity: "High" | "Medium" | "Low";
+}
+
+interface VideoFeedPanelProps {
+  onAccidentDetected?: (info: AccidentDetectionInfo) => void;
+  onAccidentReset?: () => void;
+}
 
 // WebSocket configuration
 const WS_URL = "ws://127.0.0.1:8000/ws";
@@ -66,10 +77,11 @@ const nms = (boxes: BoundingBox[], iouThreshold: number = 0.5): BoundingBox[] =>
 const MAX_HISTORY = 5;
 const CONSENSUS_THRESHOLD = 3; // Must detect in 3/5 frames to alert
 
-const VideoFeedPanel = () => {
+const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelProps) => {
   const { toast } = useToast();
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [uploadedVideo, setUploadedVideo] = useState<string | null>(null);
+  const [videoFilename, setVideoFilename] = useState<string>("");
   const [isDetecting, setIsDetecting] = useState(false);
   const [detectionResult, setDetectionResult] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
@@ -107,6 +119,12 @@ const VideoFeedPanel = () => {
   const boxPersistence = useRef<{ box: BoundingBox, count: number }[]>([]);
   const lastAlertTimeRef = useRef<number>(0);
   const lastCapturedImageRef = useRef<string | null>(null);
+  const videoFilenameRef = useRef<string>("");
+  const accidentNotifiedRef = useRef(false);
+
+  useEffect(() => {
+    videoFilenameRef.current = videoFilename;
+  }, [videoFilename]);
 
   // Initialize WebSocket connection
   useEffect(() => {
@@ -145,7 +163,7 @@ const VideoFeedPanel = () => {
               const naturalHeight = media instanceof HTMLImageElement ? media.naturalHeight : (media?.videoHeight || 640);
 
               const rawFinal = data.detections
-                .map((d: any) => ({
+                .map((d: {x: number, y: number, width: number, height: number}) => ({
                   ...d,
                   x: d.x,
                   y: d.y,
@@ -158,7 +176,7 @@ const VideoFeedPanel = () => {
               const nextPersistence: { box: BoundingBox, count: number }[] = [];
               rawFinal.forEach((newBox: BoundingBox) => {
                 let found = false;
-                for (let p of boxPersistence.current) {
+                for (const p of boxPersistence.current) {
                   const intersection = iou(p.box, newBox);
                   if (intersection > 0.5) {
                     nextPersistence.push({ box: newBox, count: Math.min(p.count + 1, 10) });
@@ -219,15 +237,21 @@ const VideoFeedPanel = () => {
                       }
 
                       console.log("Publishing alert to dashboards...");
+                      const mappedLocation = getLocationForVideo(videoFilenameRef.current);
+                      const hospitalRec = mappedLocation
+                        ? recommendHospital(mappedLocation.lat, mappedLocation.lon)
+                        : null;
                       publishAccidentAlert({
                         id: `acc-${now}`,
                         createdAt: new Date().toISOString(),
                         severity: maxConf > 0.8 ? "Critical" : (maxConf > 0.7 ? "High" : "Medium"),
                         confidence: maxConf,
-                        lat: 13.0827,
-                        lng: 80.2707,
-                        location: "Anna Salai, Chennai",
-                        assignedHospital: "Apollo Hospital",
+                        lat: mappedLocation?.lat ?? 13.0827,
+                        lng: mappedLocation?.lon ?? 80.2707,
+                        location: mappedLocation
+                          ? `${mappedLocation.location}, Chennai`
+                          : "Anna Salai, Chennai",
+                        assignedHospital: hospitalRec?.name ?? "Apollo Hospital",
                         assignedPoliceStation: "Teynampet Police Station",
                         injured: Math.floor(Math.random() * 3) + 1,
                         vehicles: Math.floor(Math.random() * 2) + 1,
@@ -397,6 +421,21 @@ const VideoFeedPanel = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, [detections, coordMode, drawBoundingBoxes, uploadedImage, uploadedVideo]);
 
+  // Notify parent once per upload so the emergency dashboard stays visible
+  useEffect(() => {
+    if (detectionResult && detectionResult.includes('Detected') && !detectionResult.includes('No')) {
+      if (!accidentNotifiedRef.current) {
+        accidentNotifiedRef.current = true;
+        let severity: "High" | "Medium" | "Low" = "Medium";
+        const match = detectionResult.match(/\d{2}/);
+        if (match && parseInt(match[0]) > 75) {
+          severity = "High";
+        }
+        onAccidentDetected?.({ videoFilename, severity });
+      }
+    }
+  }, [detectionResult, videoFilename, onAccidentDetected]);
+
   // Removed redundant redrawing effect
 
   // Processing logic
@@ -497,6 +536,9 @@ const VideoFeedPanel = () => {
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    setVideoFilename(file.name);
+    accidentNotifiedRef.current = false;
+    onAccidentReset?.();
     const isVideo = file.type.startsWith('video/');
     if (isVideo) {
       const videoUrl = URL.createObjectURL(file);
@@ -628,6 +670,7 @@ const VideoFeedPanel = () => {
             </div>
           )}
         </div>
+
       </CardContent>
     </Card>
   );
