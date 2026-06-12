@@ -8,6 +8,12 @@ export default defineConfig(({ mode }) => ({
   server: {
     host: "::",
     port: 8080,
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
+    },
     // Removed COEP/COOP headers as they can interfere with ONNX runtime blob URLs
     // These headers are not needed for ONNX runtime to work
   },

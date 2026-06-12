@@ -1,8 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Ambulance, Clock, Users, MapPin, AlertCircle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Ambulance, Clock, Users, MapPin, AlertCircle, Navigation } from "lucide-react";
 import { useAccidentAlerts } from "@/hooks/use-accident-alerts";
+import OptimizedRoutePanel from "@/components/OptimizedRoutePanel";
 
 const getSeverityColor = (severity: "Low" | "Medium" | "High" | "Critical") => {
   switch (severity) {
@@ -27,6 +29,7 @@ const getStatusColor = (status: "Ambulance Dispatched" | "Pending") => {
 
 const HospitalDashboard = () => {
   const storedAlerts = useAccidentAlerts();
+  const [expandedRouteId, setExpandedRouteId] = useState<string | null>(null);
 
   // Convert stored alerts to display format
   const accidents = useMemo(() => {
@@ -231,11 +234,39 @@ const HospitalDashboard = () => {
                       )}
                     </div>
                   )}
-                  <div className="flex items-center justify-between pt-2 border-t">
+                  <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t">
                     <Badge className={getStatusColor(accident.status)}>
                       {accident.status}
                     </Badge>
+                    {accident.assignedHospital && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-2 border-blue-200 text-blue-700 hover:bg-blue-50 dark:border-blue-900 dark:text-blue-400 dark:hover:bg-blue-950"
+                        onClick={() =>
+                          setExpandedRouteId(
+                            expandedRouteId === accident.id ? null : accident.id
+                          )
+                        }
+                      >
+                        <Navigation className="h-4 w-4" />
+                        {expandedRouteId === accident.id ? "Hide Route" : "View Optimized Route"}
+                      </Button>
+                    )}
                   </div>
+
+                  {expandedRouteId === accident.id && accident.assignedHospital && (
+                    <OptimizedRoutePanel
+                      accident={{
+                        id: accident.id,
+                        location: accident.location,
+                        lat: accident.lat,
+                        lng: accident.lng,
+                        assignedHospital: accident.assignedHospital,
+                      }}
+                    />
+                  )}
                 </CardContent>
               </Card>
             ))

@@ -61,6 +61,31 @@ export function hasMappedLocation(filename: string): boolean {
   return filename in LOCATION_MAP;
 }
 
+/** Resolve hospital coordinates from assigned hospital name in alerts */
+export function getHospitalByName(name: string): HospitalData | null {
+  const lower = name.toLowerCase().trim();
+
+  const aliases: Record<string, string> = {
+    "apollo hospital": "Apollo Hospitals Greams Road",
+    "apollo hospitals": "Apollo Hospitals Greams Road",
+  };
+
+  const aliasMatch = aliases[lower];
+  if (aliasMatch) {
+    return HOSPITALS.find((h) => h.name === aliasMatch) ?? null;
+  }
+
+  return (
+    HOSPITALS.find((h) => h.name.toLowerCase() === lower) ??
+    HOSPITALS.find(
+      (h) =>
+        h.name.toLowerCase().includes(lower) ||
+        lower.includes(h.name.toLowerCase())
+    ) ??
+    null
+  );
+}
+
 /**
  * Rank hospitals by distance, ICU availability, and trauma care.
  * Returns the best match with an explainable emergency response score (0–100).

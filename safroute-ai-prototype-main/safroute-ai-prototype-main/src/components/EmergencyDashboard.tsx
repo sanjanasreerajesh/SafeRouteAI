@@ -1,40 +1,15 @@
-import React, { useMemo } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline } from 'react-leaflet';
-import 'leaflet/dist/leaflet.css';
+import React, { useMemo } from "react";
+import "leaflet/dist/leaflet.css";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { AlertCircle, Hospital, MapPin, Activity } from "lucide-react";
-import L from 'leaflet';
+import { AlertCircle, Hospital, MapPin, Activity, Clock, Navigation } from "lucide-react";
 import {
   getLocationForVideo,
   recommendHospital,
 } from "@/lib/emergencyResponse";
-
-// Fix Leaflet's default icon issue in React
-delete (L.Icon.Default.prototype as { _getIconUrl?: unknown })._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-});
-
-const accidentIcon = new L.Icon({
-  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41],
-});
-
-const hospitalIcon = new L.Icon({
-  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41],
-});
+import { useEmergencyRoute } from "@/hooks/useEmergencyRoute";
+import { formatEta } from "@/lib/routeOptimizer";
+import EmergencyRouteMap from "@/components/EmergencyRouteMap";
 
 interface EmergencyDashboardProps {
   videoFilename: string;
@@ -48,6 +23,19 @@ const EmergencyDashboard: React.FC<EmergencyDashboardProps> = ({ videoFilename, 
     if (!accidentLocation) return null;
     return recommendHospital(accidentLocation.lat, accidentLocation.lon);
   }, [accidentLocation]);
+
+  const routeSource = accidentLocation
+    ? { lat: accidentLocation.lat, lon: accidentLocation.lon }
+    : null;
+
+  const routeDestination = bestHospital
+    ? { lat: bestHospital.lat, lon: bestHospital.lon, name: bestHospital.name }
+    : null;
+
+  const { route, loading: routeLoading } = useEmergencyRoute(
+    routeSource,
+    routeDestination
+  );
 
   if (!accidentLocation || !bestHospital) {
     return (
@@ -114,7 +102,7 @@ const EmergencyDashboard: React.FC<EmergencyDashboardProps> = ({ videoFilename, 
               </div>
             </div>
 
-            {/* Hospital Recommendation */}
+            {/* Hospital Recommendation (decision engine — auto-selected) */}
             <div className="bg-white dark:bg-slate-900 p-5 rounded-lg border border-green-200 dark:border-green-900/50 shadow-sm space-y-4">
               <h3 className="font-semibold text-lg flex items-center gap-2 text-green-700 dark:text-green-500">
                 <Hospital className="h-5 w-5" />
@@ -122,12 +110,26 @@ const EmergencyDashboard: React.FC<EmergencyDashboardProps> = ({ videoFilename, 
               </h3>
               <p className="text-lg font-medium">{bestHospital.name}</p>
 
-              <div className="pt-2 border-t border-green-100 dark:border-green-900/30">
-                <p className="text-sm text-muted-foreground mb-1">Distance</p>
-                <p className="text-xl font-bold text-green-700 dark:text-green-400">
-                  {bestHospital.dist.toFixed(1)} km
-                </p>
-              </div>
+              {route && (
+                <div className="grid grid-cols-2 gap-3 pt-2 border-t border-green-100 dark:border-green-900/30">
+                  <div>
+                    <p className="text-xs text-muted-foreground flex items-center gap-1 mb-1">
+                      <Navigation className="h-3 w-3" /> Driving Distance
+                    </p>
+                    <p className="text-xl font-bold text-green-700 dark:text-green-400">
+                      {route.distanceKm.toFixed(1)} km
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground flex items-center gap-1 mb-1">
+                      <Clock className="h-3 w-3" /> ETA
+                    </p>
+                    <p className="text-xl font-bold text-green-700 dark:text-green-400">
+                      {formatEta(route.etaMinutes)}
+                    </p>
+                  </div>
+                </div>
+              )}
 
               <div className="pt-2 border-t border-green-100 dark:border-green-900/30">
                 <p className="font-medium mb-2 text-sm text-muted-foreground">Reason</p>
@@ -149,52 +151,43 @@ const EmergencyDashboard: React.FC<EmergencyDashboardProps> = ({ videoFilename, 
             </div>
           </div>
 
-          {/* OpenStreetMap — below detection results */}
+          {/* Route Optimization — map display */}
           <div className="space-y-2">
             <h3 className="font-semibold text-base flex items-center gap-2 text-foreground">
               <MapPin className="h-4 w-4 text-red-500" />
-              Accident Location & Emergency Route
+              Emergency Route
+              {route && !route.isFallback && (
+                <Badge variant="secondary" className="text-xs font-normal">Optimized</Badge>
+              )}
+              {route?.isFallback && (
+                <Badge variant="outline" className="text-xs font-normal">Estimated</Badge>
+              )}
             </h3>
-            <div
-              className="rounded-lg overflow-hidden border border-slate-200 dark:border-slate-800 shadow-md w-full"
-              style={{ height: '300px', minHeight: '240px' }}
-            >
-              <MapContainer
-                key={`${accidentLocation.lat}-${accidentLocation.lon}-${bestHospital.name}`}
-                center={[accidentLocation.lat, accidentLocation.lon]}
-                zoom={12}
-                scrollWheelZoom={false}
-                style={{ height: '100%', width: '100%' }}
-              >
-                <TileLayer
-                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                />
-                <Marker position={[accidentLocation.lat, accidentLocation.lon]} icon={accidentIcon}>
-                  <Popup>
-                    <strong>🚨 Accident Location</strong>
-                    <br />
-                    {accidentLocation.location}
-                  </Popup>
-                </Marker>
-                <Marker position={[bestHospital.lat, bestHospital.lon]} icon={hospitalIcon}>
-                  <Popup>
-                    <strong>🏥 {bestHospital.name}</strong>
-                    <br />
-                    Distance: {bestHospital.dist.toFixed(1)} km
-                  </Popup>
-                </Marker>
-                <Polyline
-                  positions={[
-                    [accidentLocation.lat, accidentLocation.lon],
-                    [bestHospital.lat, bestHospital.lon],
-                  ]}
-                  color="#2563eb"
-                  weight={4}
-                  dashArray="10, 10"
-                />
-              </MapContainer>
-            </div>
+
+
+            <EmergencyRouteMap
+              accidentLocation={accidentLocation}
+              hospital={bestHospital}
+              route={route}
+              loading={routeLoading}
+            />
+
+            {route && (
+              <div className="flex flex-wrap gap-4 text-sm text-muted-foreground bg-slate-50 dark:bg-slate-900/50 rounded-lg px-4 py-3 border">
+                <span className="flex items-center gap-1">
+                  <Hospital className="h-4 w-4" />
+                  <strong className="text-foreground">{route.hospitalName}</strong>
+                </span>
+                <span className="flex items-center gap-1">
+                  <Navigation className="h-4 w-4" />
+                  {route.distanceKm.toFixed(1)} km
+                </span>
+                <span className="flex items-center gap-1">
+                  <Clock className="h-4 w-4" />
+                  ETA {formatEta(route.etaMinutes)}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </CardContent>
