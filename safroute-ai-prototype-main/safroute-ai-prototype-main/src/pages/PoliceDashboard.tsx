@@ -13,8 +13,10 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
-import { useAccidentAlerts, markAlertNotNew } from "@/hooks/use-accident-alerts";
+import { useAccidentAlerts } from "@/hooks/use-accident-alerts";
 import { markAlertNotNew as markNotNew } from "@/lib/accidentAlerts";
+import PostureAnalysisDisplay from "@/components/PostureAnalysisDisplay";
+import { getPostureRiskColor, getPostureStatusColor, resolveAlertSeverity } from "@/lib/postureAnalysis";
 
 const getSeverityColor = (severity: "Low" | "Medium" | "High" | "Critical") => {
   switch (severity) {
@@ -52,7 +54,7 @@ const PoliceDashboard = () => {
   const accidents = useMemo(() => {
     return storedAlerts.map((a) => ({
       id: a.id.replace("acc-", "").slice(-6),
-      severity: a.severity,
+      severity: resolveAlertSeverity(a.severity, a.postureAnalysis),
       vehicles: a.vehicles,
       roadType: a.roadType,
       time: new Date(a.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
@@ -67,6 +69,8 @@ const PoliceDashboard = () => {
       assignedPoliceStation: a.assignedPoliceStation,
       photoDataUrl: a.photoDataUrl,
       isNew: a.isNew,
+      confidence: a.confidence,
+      postureAnalysis: a.postureAnalysis,
     }));
   }, [storedAlerts]);
 
@@ -204,6 +208,42 @@ const PoliceDashboard = () => {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
+                  <div className="rounded-lg border bg-red-50 dark:bg-red-950/20 p-4 space-y-2">
+                    <p className="font-semibold text-red-700 dark:text-red-400">Accident Confirmed</p>
+                    {accident.confidence != null && (
+                      <p className="text-sm">
+                        <span className="text-muted-foreground">Confidence: </span>
+                        <span className="font-semibold">{(accident.confidence * 100).toFixed(0)}%</span>
+                      </p>
+                    )}
+                    {accident.postureAnalysis && (
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-sm">
+                        <div>
+                          <span className="text-muted-foreground">Posture Status: </span>
+                          <Badge className={getPostureStatusColor(accident.postureAnalysis.status)}>
+                            {accident.postureAnalysis.status}
+                          </Badge>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Risk Level: </span>
+                          <Badge className={getPostureRiskColor(accident.postureAnalysis.risk)}>
+                            {accident.postureAnalysis.risk}
+                          </Badge>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Persons Detected: </span>
+                          <span className="font-semibold">{accident.postureAnalysis.persons_detected}</span>
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2 text-sm">
+                      <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-muted-foreground">Time: </span>
+                      <span className="font-semibold">{accident.time}</span>
+                      <span className="text-muted-foreground ml-2">Location: </span>
+                      <span className="font-semibold">{accident.location}</span>
+                    </div>
+                  </div>
                   {/* Show photo for alert if available */}
                   {accident.photoDataUrl && (
                     <div className="rounded-lg overflow-hidden border bg-muted">
@@ -264,6 +304,9 @@ const PoliceDashboard = () => {
                         </div>
                       )}
                     </div>
+                  )}
+                  {accident.postureAnalysis && (
+                    <PostureAnalysisDisplay posture={accident.postureAnalysis} />
                   )}
                   <div className="flex items-center justify-between pt-2 border-t">
                     <Badge className={getTrafficStatusColor(accident.trafficStatus)}>

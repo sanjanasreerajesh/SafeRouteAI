@@ -8,6 +8,9 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
 import { publishAccidentAlert } from "@/lib/accidentAlerts";
 import { getLocationForVideo, recommendHospital } from "@/lib/emergencyResponse";
+import PostureAnalysisDisplay from "@/components/PostureAnalysisDisplay";
+import type { PostureAnalysis } from "@/lib/postureAnalysis";
+import { resolvePostureForVideo, resolveAlertSeverity } from "@/lib/postureAnalysis";
 
 export interface AccidentDetectionInfo {
   videoFilename: string;
@@ -87,6 +90,7 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
   const [wsConnected, setWsConnected] = useState(false);
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [detections, setDetections] = useState<BoundingBox[]>([]);
+  const [postureResult, setPostureResult] = useState<PostureAnalysis | null>(null);
   const [originalImageSize, setOriginalImageSize] = useState<{ width: number; height: number } | null>(null);
 
   // Detection Threshold (Sensitivity)
@@ -118,6 +122,7 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
   const detectionHistory = useRef<BoundingBox[][]>([]);
   const boxPersistence = useRef<{ box: BoundingBox, count: number }[]>([]);
   const lastAlertTimeRef = useRef<number>(0);
+  const lastPostureRef = useRef<PostureAnalysis | null>(null);
   const lastCapturedImageRef = useRef<string | null>(null);
   const videoFilenameRef = useRef<string>("");
   const accidentNotifiedRef = useRef(false);
@@ -155,8 +160,19 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
-            if (data.detections) {
+              if (data.detections) {
               console.log("WS Response received:", data.detections.length, "detections");
+              const resolvedPosture = resolvePostureForVideo(
+                videoFilenameRef.current,
+                data.posture ?? null
+              );
+              if (resolvedPosture) {
+                setPostureResult(resolvedPosture);
+                lastPostureRef.current = resolvedPosture;
+              } else if (data.detections.length === 0) {
+                setPostureResult(null);
+                lastPostureRef.current = null;
+              }
               const media = imageRef.current || videoRef.current;
               const isImageSource = !!imageRef.current;
               const naturalWidth = media instanceof HTMLImageElement ? media.naturalWidth : (media?.videoWidth || 640);
@@ -241,10 +257,16 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
                       const hospitalRec = mappedLocation
                         ? recommendHospital(mappedLocation.lat, mappedLocation.lon)
                         : null;
+                      const alertPosture = resolvePostureForVideo(
+                        videoFilenameRef.current,
+                        lastPostureRef.current
+                      );
+                      const confidenceSeverity =
+                        maxConf > 0.8 ? "Critical" : maxConf > 0.7 ? "High" : "Medium";
                       publishAccidentAlert({
                         id: `acc-${now}`,
                         createdAt: new Date().toISOString(),
-                        severity: maxConf > 0.8 ? "Critical" : (maxConf > 0.7 ? "High" : "Medium"),
+                        severity: resolveAlertSeverity(confidenceSeverity, alertPosture),
                         confidence: maxConf,
                         lat: mappedLocation?.lat ?? 13.0827,
                         lng: mappedLocation?.lon ?? 80.2707,
@@ -253,7 +275,9 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
                           : "Anna Salai, Chennai",
                         assignedHospital: hospitalRec?.name ?? "Apollo Hospital",
                         assignedPoliceStation: "Teynampet Police Station",
-                        injured: Math.floor(Math.random() * 3) + 1,
+                        injured: alertPosture?.persons_detected
+                          ? Math.max(alertPosture.persons_detected, 1)
+                          : Math.floor(Math.random() * 3) + 1,
                         vehicles: Math.floor(Math.random() * 2) + 1,
                         roadType: "Highway",
                         photoDataUrl: annotatedDataUrl || undefined,
@@ -261,7 +285,8 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
                         hospitalStatus: "Pending",
                         trafficStatus: "Road Blocked",
                         investigationStatus: "Pending",
-                        isNew: true
+                        isNew: true,
+                        postureAnalysis: alertPosture ?? undefined,
                       });
 
                       toast({
@@ -639,6 +664,10 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
           <Badge variant={detectionResult.includes('Detected') && !detectionResult.includes('No') ? 'destructive' : 'secondary'} className="w-full justify-center py-2 text-md">
             {detectionResult} {detections.length > 0 ? `(${detections.length} boxes)` : ''}
           </Badge>
+        )}
+
+        {postureResult && detections.length > 0 && (
+          <PostureAnalysisDisplay posture={postureResult} />
         )}
 
         <div className="relative w-full bg-slate-900 rounded-lg overflow-hidden" style={{ minHeight: '600px', height: '85vh' }}>

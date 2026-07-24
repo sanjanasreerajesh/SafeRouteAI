@@ -6,6 +6,8 @@ import onnxruntime as ort
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from posture_analysis import PostureAnalyzer, POSTURE_ENABLED
+
 # ================= CONFIG =================
 IMG_SIZE = 640
 CONF_THRES = 0.6
@@ -81,6 +83,7 @@ async def health():
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     global accident_frame_counter
+    posture_analyzer = PostureAnalyzer() if POSTURE_ENABLED else None
     await websocket.accept()
     print("WebSocket connected")
 
@@ -182,8 +185,22 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
             else:
                 detections = []  # ❌ suppress early detections
+                if posture_analyzer:
+                    posture_analyzer.reset()
 
-            await websocket.send_json({"detections": detections})
+            # Posture analysis on confirmed accident (optional, non-breaking)
+            response = {"detections": detections}
+            if detections and posture_analyzer is not None:
+                best = max(detections, key=lambda d: d["confidence"])
+                x, y, bw, bh = best["x"], best["y"], best["width"], best["height"]
+                crop = frame[y : y + bh, x : x + bw]
+                if crop.size > 0:
+                    posture_result = posture_analyzer.analyze_posture(crop)
+                    response["posture"] = posture_result
+                    response["accident"] = True
+                    response["confidence"] = best["confidence"]
+
+            await websocket.send_json(response)
 
     except WebSocketDisconnect:
         print("WebSocket disconnected")

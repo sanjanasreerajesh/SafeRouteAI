@@ -2,6 +2,7 @@ fastapi
 uvicorn
 websockets
 opencv-python
-numpy<2.0.0
+numpy
 onnxruntime>=1.19.0
 python-multipart
+mediapipe

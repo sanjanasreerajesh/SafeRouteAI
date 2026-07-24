@@ -5,6 +5,23 @@ export type TrafficStatus = "Road Blocked" | "Diverted" | "Cleared";
 export type InvestigationStatus = "Pending" | "Under Investigation" | "Completed";
 export type RoadType = "Highway" | "City" | "Junction";
 
+export type PostureStatus =
+  | "Stable"
+  | "Conscious"
+  | "Possible Injury"
+  | "Critical"
+  | "Unknown";
+
+export type PostureRisk = "Low" | "Medium" | "High" | "Critical" | "Unknown";
+
+export interface PostureAnalysis {
+  status: PostureStatus;
+  risk: PostureRisk;
+  body_angle: number;
+  persons_detected: number;
+  motion: "Low" | "Medium" | "High" | "Unknown";
+}
+
 export interface AccidentAlert {
   id: string;
   createdAt: string; // ISO
@@ -34,6 +51,9 @@ export interface AccidentAlert {
 
   // UI helper
   isNew: boolean;
+
+  // Posture analysis (optional extension)
+  postureAnalysis?: PostureAnalysis;
 }
 
 const STORAGE_KEY = "safroute.accidentAlerts.v1";

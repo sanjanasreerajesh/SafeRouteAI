@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Ambulance, Clock, Users, MapPin, AlertCircle, Navigation } from "lucide-react";
 import { useAccidentAlerts } from "@/hooks/use-accident-alerts";
 import OptimizedRoutePanel from "@/components/OptimizedRoutePanel";
+import PostureAnalysisDisplay from "@/components/PostureAnalysisDisplay";
+import { getPostureRiskColor, getPostureStatusColor, resolveAlertSeverity } from "@/lib/postureAnalysis";
 
 const getSeverityColor = (severity: "Low" | "Medium" | "High" | "Critical") => {
   switch (severity) {
@@ -35,7 +37,7 @@ const HospitalDashboard = () => {
   const accidents = useMemo(() => {
     return storedAlerts.map((a) => ({
       id: a.id.replace("acc-", "").slice(-6),
-      severity: a.severity,
+      severity: resolveAlertSeverity(a.severity, a.postureAnalysis),
       injured: a.injured,
       time: new Date(a.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       date: new Date(a.createdAt).toISOString().slice(0, 10),
@@ -48,6 +50,8 @@ const HospitalDashboard = () => {
       assignedHospital: a.assignedHospital,
       assignedPoliceStation: a.assignedPoliceStation,
       photoDataUrl: a.photoDataUrl,
+      confidence: a.confidence,
+      postureAnalysis: a.postureAnalysis,
     }));
   }, [storedAlerts]);
 
@@ -180,6 +184,44 @@ const HospitalDashboard = () => {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
+                  <div className="rounded-lg border bg-red-50 dark:bg-red-950/20 p-4 space-y-2">
+                    <p className="font-semibold text-red-700 dark:text-red-400">Accident Detected</p>
+                    {accident.confidence != null && (
+                      <p className="text-sm">
+                        <span className="text-muted-foreground">Confidence: </span>
+                        <span className="font-semibold">{(accident.confidence * 100).toFixed(0)}%</span>
+                      </p>
+                    )}
+                    {accident.postureAnalysis ? (
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div>
+                          <span className="text-muted-foreground">Posture: </span>
+                          <Badge className={getPostureStatusColor(accident.postureAnalysis.status)}>
+                            {accident.postureAnalysis.status}
+                          </Badge>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Risk: </span>
+                          <Badge className={getPostureRiskColor(accident.postureAnalysis.risk)}>
+                            {accident.postureAnalysis.risk}
+                          </Badge>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Persons: </span>
+                          <span className="font-semibold">{accident.postureAnalysis.persons_detected}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Location: </span>
+                          <span className="font-semibold">{accident.location}</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm">
+                        <span className="text-muted-foreground">Location: </span>
+                        <span className="font-semibold">{accident.location}</span>
+                      </p>
+                    )}
+                  </div>
                   {/* Show photo for alert if available */}
                   {accident.photoDataUrl && (
                     <div className="rounded-lg overflow-hidden border bg-muted">
@@ -233,6 +275,9 @@ const HospitalDashboard = () => {
                         </div>
                       )}
                     </div>
+                  )}
+                  {accident.postureAnalysis && (
+                    <PostureAnalysisDisplay posture={accident.postureAnalysis} />
                   )}
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t">
                     <Badge className={getStatusColor(accident.status)}>
