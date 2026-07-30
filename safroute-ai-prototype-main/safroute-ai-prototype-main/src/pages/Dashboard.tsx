@@ -20,6 +20,8 @@ const Dashboard = () => {
             <EmergencyDashboard
               videoFilename={accidentInfo.videoFilename}
               severity={accidentInfo.severity}
+              accidentLocation={accidentInfo.location}
+              locationSource={accidentInfo.locationSource}
             />
           ) : (
             <Card className="overflow-hidden animate-fade-in border-dashed">

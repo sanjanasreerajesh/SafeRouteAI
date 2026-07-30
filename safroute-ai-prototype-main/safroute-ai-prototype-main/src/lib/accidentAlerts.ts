@@ -54,6 +54,35 @@ export interface AccidentAlert {
 
   // Posture analysis (optional extension)
   postureAnalysis?: PostureAnalysis;
+
+  // Deduplication key: one alert per accident event (e.g. video upload session)
+  eventKey?: string;
+
+  // Dynamic hospital assignment (from POST /detect-accident)
+  assignedHospitalLat?: number;
+  assignedHospitalLng?: number;
+  assignedHospitalAddress?: string;
+  assignedHospitalPhone?: string | null;
+  hospitalMapsUrl?: string;
+  isHospitalRegistered?: boolean;
+  integrationMessage?: string;
+  hospitalSelectionReason?: string;
+  routeDistanceKm?: number;
+  etaMinutes?: number;
+  routePolyline?: [number, number][];
+
+  // Dynamic police assignment (from POST /nearest-police)
+  assignedPoliceLat?: number;
+  assignedPoliceLng?: number;
+  assignedPoliceAddress?: string;
+  assignedPolicePhone?: string | null;
+  policeMapsUrl?: string;
+  isPoliceRegistered?: boolean;
+  policeIntegrationMessage?: string;
+  policeSelectionReason?: string;
+  policeRouteDistanceKm?: number;
+  policeEtaMinutes?: number;
+  policeRoutePolyline?: [number, number][];
 }
 
 const STORAGE_KEY = "safroute.accidentAlerts.v1";
@@ -122,10 +151,32 @@ export function subscribeAccidentAlerts(onChange: (alerts: AccidentAlert[]) => v
 export function publishAccidentAlert(alert: AccidentAlert) {
   console.log("lib: publishAccidentAlert called", alert.id);
   const alerts = loadAlerts();
+
+  if (alert.eventKey) {
+    const duplicate = alerts.some((a) => a.eventKey === alert.eventKey);
+    if (duplicate) {
+      console.log("lib: skipping duplicate alert for event", alert.eventKey);
+      return;
+    }
+  }
+
   const next = [alert, ...alerts];
   saveAlerts(next);
   emitter.dispatchEvent(new Event(EVENT_NAME));
   console.log("lib: update event dispatched");
+}
+
+/** Keep the first alert per accident event (eventKey, or source+location fallback) */
+export function dedupeAlertsByEvent(alerts: AccidentAlert[]): AccidentAlert[] {
+  const seen = new Set<string>();
+  const result: AccidentAlert[] = [];
+  for (const alert of alerts) {
+    const key = alert.eventKey ?? `${alert.source}:${alert.location}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(alert);
+  }
+  return result;
 }
 
 export function markAlertNotNew(alertId: string) {
@@ -133,5 +184,38 @@ export function markAlertNotNew(alertId: string) {
   const next = alerts.map((a) => (a.id === alertId ? { ...a, isNew: false } : a));
   saveAlerts(next);
   emitter.dispatchEvent(new Event(EVENT_NAME));
+}
+
+export function updateAccidentAlert(alertId: string, patch: Partial<AccidentAlert>) {
+  const alerts = loadAlerts();
+  const next = alerts.map((a) => (a.id === alertId ? { ...a, ...patch } : a));
+  saveAlerts(next);
+  emitter.dispatchEvent(new Event(EVENT_NAME));
+}
+
+/** Old static Chennai hospitals — refresh these to dynamic lookup */
+const LEGACY_STATIC_HOSPITALS = new Set([
+  "Apollo Hospitals Greams Road",
+  "MIOT International",
+  "MGM Healthcare",
+  "Gleneagles HealthCity Chennai",
+  "SIMS Hospital",
+]);
+
+/** Old hardcoded police station — refresh to dynamic lookup */
+const LEGACY_STATIC_POLICE = new Set([
+  "Teynampet Police Station",
+  "Anna Salai Police Station",
+  "Koyambedu Police Station",
+]);
+
+export function alertNeedsHospitalRefresh(alert: AccidentAlert): boolean {
+  if (alert.assignedHospitalLat == null || alert.assignedHospitalLng == null) return true;
+  return LEGACY_STATIC_HOSPITALS.has(alert.assignedHospital);
+}
+
+export function alertNeedsPoliceRefresh(alert: AccidentAlert): boolean {
+  if (alert.assignedPoliceLat == null || alert.assignedPoliceLng == null) return true;
+  return LEGACY_STATIC_POLICE.has(alert.assignedPoliceStation);
 }
 

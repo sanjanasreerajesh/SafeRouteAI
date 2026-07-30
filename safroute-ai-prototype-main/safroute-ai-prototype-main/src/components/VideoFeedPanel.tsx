@@ -1,20 +1,26 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Video, Info, Upload, Play, AlertTriangle, AlertCircle } from "lucide-react";
+import { Video, Info, Upload, Play, AlertTriangle, MapPin, LocateFixed } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
 import { publishAccidentAlert } from "@/lib/accidentAlerts";
-import { getLocationForVideo, recommendHospital } from "@/lib/emergencyResponse";
+import { type LocationData } from "@/lib/emergencyResponse";
+import { detectAccident, toApiSeverity } from "@/lib/dynamicEmergency";
+import { fetchNearestPolice, toPoliceApiSeverity } from "@/lib/dynamicPolice";
+import { resolveAccidentLocation, type ResolvedLocation } from "@/lib/locationService";
 import PostureAnalysisDisplay from "@/components/PostureAnalysisDisplay";
 import type { PostureAnalysis } from "@/lib/postureAnalysis";
-import { resolvePostureForVideo, resolveAlertSeverity } from "@/lib/postureAnalysis";
+import { resolvePostureForVideo, resolveAlertSeverity, isMeaningfulPosture, getDefaultPostureForVideo } from "@/lib/postureAnalysis";
 
 export interface AccidentDetectionInfo {
   videoFilename: string;
   severity: "High" | "Medium" | "Low";
+  location: LocationData;
+  locationSource: ResolvedLocation["source"];
 }
 
 interface VideoFeedPanelProps {
@@ -77,8 +83,11 @@ const nms = (boxes: BoundingBox[], iouThreshold: number = 0.5): BoundingBox[] =>
 
 // -------------------------------------------------------------------------------
 
-const MAX_HISTORY = 5;
-const CONSENSUS_THRESHOLD = 3; // Must detect in 3/5 frames to alert
+const MAX_HISTORY = 8;
+const CONSENSUS_THRESHOLD = 5; // Must detect in 5/8 frames to alert
+const MIN_STABLE_FRAMES_VIDEO = 5;
+const MIN_STABLE_FRAMES_IMAGE = 2;
+const MIN_BOX_AREA_RATIO = 0.008;
 
 const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelProps) => {
   const { toast } = useToast();
@@ -93,8 +102,17 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
   const [postureResult, setPostureResult] = useState<PostureAnalysis | null>(null);
   const [originalImageSize, setOriginalImageSize] = useState<{ width: number; height: number } | null>(null);
 
-  // Detection Threshold (Sensitivity)
-  const [threshold, setThreshold] = useState(0.55);
+  // Detection Threshold (Sensitivity) — higher = fewer false positives
+  const [threshold, setThreshold] = useState(0.75);
+
+  // Accident location (manual / GPS / video fallback)
+  const [locationName, setLocationName] = useState("");
+  const [locationLat, setLocationLat] = useState("");
+  const [locationLng, setLocationLng] = useState("");
+  const [preferGps, setPreferGps] = useState(true);
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [activeLocationLabel, setActiveLocationLabel] = useState<string | null>(null);
+  const accidentLocationRef = useRef<ResolvedLocation | null>(null);
 
   // State for coordinate mode
   const [coordMode, setCoordMode] = useState<'auto' | 'norm' | 'pixel'>('auto');
@@ -123,6 +141,8 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
   const boxPersistence = useRef<{ box: BoundingBox, count: number }[]>([]);
   const lastAlertTimeRef = useRef<number>(0);
   const lastPostureRef = useRef<PostureAnalysis | null>(null);
+  const postureLockedRef = useRef(false);
+  const alertPublishedForEventRef = useRef(false);
   const lastCapturedImageRef = useRef<string | null>(null);
   const videoFilenameRef = useRef<string>("");
   const accidentNotifiedRef = useRef(false);
@@ -130,6 +150,41 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
   useEffect(() => {
     videoFilenameRef.current = videoFilename;
   }, [videoFilename]);
+
+  const handleUseGps = async () => {
+    setGpsLoading(true);
+    try {
+      const resolved = await resolveAccidentLocation({ useGps: true });
+      setLocationLat(resolved.lat.toFixed(6));
+      setLocationLng(resolved.lon.toFixed(6));
+      setLocationName(resolved.location);
+      setActiveLocationLabel(`${resolved.location} (GPS)`);
+      accidentLocationRef.current = resolved;
+      toast({
+        title: "Location updated",
+        description: resolved.location,
+      });
+    } catch {
+      toast({
+        title: "GPS unavailable",
+        description: "Allow location access or enter coordinates manually.",
+        variant: "destructive",
+      });
+    } finally {
+      setGpsLoading(false);
+    }
+  };
+
+  const getManualLocationInput = (): Partial<LocationData> | null => {
+    const lat = parseFloat(locationLat);
+    const lon = parseFloat(locationLng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    return {
+      lat,
+      lon,
+      location: locationName.trim() || undefined,
+    };
+  };
 
   // Initialize WebSocket connection
   useEffect(() => {
@@ -162,16 +217,37 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
             const data = JSON.parse(event.data);
               if (data.detections) {
               console.log("WS Response received:", data.detections.length, "detections");
-              const resolvedPosture = resolvePostureForVideo(
-                videoFilenameRef.current,
-                data.posture ?? null
-              );
-              if (resolvedPosture) {
-                setPostureResult(resolvedPosture);
-                lastPostureRef.current = resolvedPosture;
+
+              // Lock posture after first confirmed estimation (or demo default)
+              if (data.posture_final && data.posture) {
+                const resolvedPosture = resolvePostureForVideo(
+                  videoFilenameRef.current,
+                  data.posture
+                );
+                if (resolvedPosture) {
+                  setPostureResult(resolvedPosture);
+                  lastPostureRef.current = resolvedPosture;
+                  postureLockedRef.current = true;
+                }
+              } else if (!postureLockedRef.current && data.detections.length > 0) {
+                const resolvedPosture = resolvePostureForVideo(
+                  videoFilenameRef.current,
+                  data.posture ?? null
+                );
+                if (resolvedPosture) {
+                  setPostureResult(resolvedPosture);
+                  lastPostureRef.current = resolvedPosture;
+                  if (getDefaultPostureForVideo(videoFilenameRef.current)) {
+                    postureLockedRef.current = true;
+                  }
+                }
               } else if (data.detections.length === 0) {
                 setPostureResult(null);
                 lastPostureRef.current = null;
+                postureLockedRef.current = false;
+                detectionHistory.current = [];
+                boxPersistence.current = [];
+                setDetections([]);
               }
               const media = imageRef.current || videoRef.current;
               const isImageSource = !!imageRef.current;
@@ -179,14 +255,29 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
               const naturalHeight = media instanceof HTMLImageElement ? media.naturalHeight : (media?.videoHeight || 640);
 
               const rawFinal = data.detections
-                .map((d: {x: number, y: number, width: number, height: number}) => ({
+                .filter((d: { confidence?: number; confirmed?: boolean; width: number; height: number }) => {
+                  const conf = d.confidence ?? 0;
+                  const area = d.width * d.height;
+                  const minArea = naturalWidth * naturalHeight * MIN_BOX_AREA_RATIO;
+                  return conf >= threshold && d.confirmed !== false && area >= minArea;
+                })
+                .map((d: {x: number, y: number, width: number, height: number, confidence?: number}) => ({
                   ...d,
                   x: d.x,
                   y: d.y,
                   width: d.width,
                   height: d.height,
+                  confidence: d.confidence ?? 0,
                   label: 'Accident'
                 }));
+
+              // Frame consensus — reduce single-frame false positives
+              detectionHistory.current.push(rawFinal);
+              if (detectionHistory.current.length > MAX_HISTORY) {
+                detectionHistory.current.shift();
+              }
+              const consensusCount = detectionHistory.current.filter((h) => h.length > 0).length;
+              const hasConsensus = consensusCount >= CONSENSUS_THRESHOLD;
 
               // Match current detections with persistent boxes for smoothing
               const nextPersistence: { box: BoundingBox, count: number }[] = [];
@@ -204,24 +295,28 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
               });
 
               boxPersistence.current = nextPersistence;
-              // For images, we show boxes immediately (count >= 1). For video, we wait for stability (count >= 2).
-              const stableBoxes = boxPersistence.current.filter(p => isImageSource ? p.count >= 1 : p.count >= 2).map(p => p.box);
+              const minStable = isImageSource ? MIN_STABLE_FRAMES_IMAGE : MIN_STABLE_FRAMES_VIDEO;
+              const stableBoxes = boxPersistence.current
+                .filter((p) => p.count >= minStable && p.box.confidence >= threshold)
+                .map((p) => p.box);
 
               setDetections(stableBoxes);
 
-              // Trigger on stable boxes (smoothing) OR raw detections above user threshold
-              const alertBoxes = stableBoxes.length > 0 ? stableBoxes : rawFinal.filter((d: BoundingBox) => d.confidence >= threshold);
+              // Alert only on stable + consensus + confirmed backend detections
+              const alertBoxes = hasConsensus ? stableBoxes : [];
 
               console.log(`Detections received: ${rawFinal.length}, Stable: ${stableBoxes.length}, Alert candidates: ${alertBoxes.length}`);
 
               if (alertBoxes.length > 0) {
                 const maxConf = Math.max(...alertBoxes.map(d => d.confidence));
                 setDetectionResult(`Accident Detected! ${(maxConf * 100).toFixed(0)}%`);
-                console.log(`Alert condition met. Max confidence: ${maxConf}`);
+                console.log(`Alert condition met. Max confidence: ${maxConf}, consensus: ${consensusCount}/${MAX_HISTORY}`);
 
                 const now = Date.now();
-                // Cooldown: 5 seconds for testing/responsiveness
-                if (now - lastAlertTimeRef.current > 5000) {
+
+                // One alert + posture record per accident event (per video/image upload)
+                if (!alertPublishedForEventRef.current) {
+                  alertPublishedForEventRef.current = true;
                   lastAlertTimeRef.current = now;
 
                   // Create annotated image with bounding boxes for the alert
@@ -253,28 +348,73 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
                       }
 
                       console.log("Publishing alert to dashboards...");
-                      const mappedLocation = getLocationForVideo(videoFilenameRef.current);
-                      const hospitalRec = mappedLocation
-                        ? recommendHospital(mappedLocation.lat, mappedLocation.lon)
-                        : null;
+                      void (async () => {
+                      const resolvedLocation = await resolveAccidentLocation({
+                        manual: getManualLocationInput(),
+                        useGps: preferGps && !getManualLocationInput(),
+                        videoFilename: videoFilenameRef.current,
+                      });
+                      accidentLocationRef.current = resolvedLocation;
+                      setActiveLocationLabel(
+                        `${resolvedLocation.location} (${resolvedLocation.source.toUpperCase()})`
+                      );
+                      const hospitalRec = await detectAccident(
+                        resolvedLocation.lat,
+                        resolvedLocation.lon,
+                        toApiSeverity(confidenceSeverity),
+                        resolvedLocation.location
+                      );
+                      const policeRec = await fetchNearestPolice(
+                        resolvedLocation.lat,
+                        resolvedLocation.lon,
+                        toPoliceApiSeverity(confidenceSeverity),
+                        resolvedLocation.location
+                      );
+                      const nearest = hospitalRec?.nearestHospital;
+                      const nearestPolice = policeRec?.nearestPoliceStation;
                       const alertPosture = resolvePostureForVideo(
                         videoFilenameRef.current,
                         lastPostureRef.current
                       );
                       const confidenceSeverity =
                         maxConf > 0.8 ? "Critical" : maxConf > 0.7 ? "High" : "Medium";
+                      const locationLabel = resolvedLocation.location;
+                      const eventKey = `${videoFilenameRef.current || "media"}:${locationLabel}`;
                       publishAccidentAlert({
                         id: `acc-${now}`,
                         createdAt: new Date().toISOString(),
+                        eventKey,
                         severity: resolveAlertSeverity(confidenceSeverity, alertPosture),
                         confidence: maxConf,
-                        lat: mappedLocation?.lat ?? 13.0827,
-                        lng: mappedLocation?.lon ?? 80.2707,
-                        location: mappedLocation
-                          ? `${mappedLocation.location}, Chennai`
-                          : "Anna Salai, Chennai",
-                        assignedHospital: hospitalRec?.name ?? "Apollo Hospital",
-                        assignedPoliceStation: "Teynampet Police Station",
+                        lat: resolvedLocation.lat,
+                        lng: resolvedLocation.lon,
+                        location: locationLabel,
+                        assignedHospital: nearest?.name ?? "Searching…",
+                        assignedHospitalLat: nearest?.latitude,
+                        assignedHospitalLng: nearest?.longitude,
+                        assignedHospitalAddress: nearest?.address,
+                        assignedHospitalPhone: nearest?.phone,
+                        hospitalMapsUrl: nearest?.maps_url,
+                        isHospitalRegistered: hospitalRec?.integration?.registered ?? false,
+                        integrationMessage: hospitalRec?.integration?.registered
+                          ? hospitalRec?.integration?.message
+                          : undefined,
+                        hospitalSelectionReason: nearest?.selection_reason,
+                        routeDistanceKm: hospitalRec?.route?.distance_km,
+                        etaMinutes: hospitalRec?.route?.eta_minutes,
+                        routePolyline: hospitalRec?.route?.polyline,
+                        assignedPoliceStation: nearestPolice?.name ?? "Searching…",
+                        assignedPoliceLat: nearestPolice?.latitude,
+                        assignedPoliceLng: nearestPolice?.longitude,
+                        assignedPoliceAddress: nearestPolice?.address,
+                        assignedPolicePhone: nearestPolice?.phone,
+                        policeMapsUrl: nearestPolice?.maps_url,
+                        isPoliceRegistered: policeRec?.integration?.registered ?? false,
+                        policeIntegrationMessage: policeRec?.integration?.message,
+                        policeSelectionReason: nearestPolice?.selection_reason,
+                        policeRouteDistanceKm: policeRec?.route?.distance_km,
+                        policeEtaMinutes: policeRec?.route?.eta_minutes,
+                        policeRoutePolyline: policeRec?.route?.polyline,
                         injured: alertPosture?.persons_detected
                           ? Math.max(alertPosture.persons_detected, 1)
                           : Math.floor(Math.random() * 3) + 1,
@@ -289,22 +429,40 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
                         postureAnalysis: alertPosture ?? undefined,
                       });
 
+                      if (!accidentNotifiedRef.current) {
+                        accidentNotifiedRef.current = true;
+                        let severity: "High" | "Medium" | "Low" = "Medium";
+                        if (maxConf > 0.75) severity = "High";
+                        onAccidentDetected?.({
+                          videoFilename: videoFilenameRef.current,
+                          severity,
+                          location: {
+                            location: resolvedLocation.location,
+                            lat: resolvedLocation.lat,
+                            lon: resolvedLocation.lon,
+                          },
+                          locationSource: resolvedLocation.source,
+                        });
+                      }
+
                       toast({
                         title: "🚨 Accident Alert Sent",
                         description: "Hospital and Police dashboards have been notified.",
                         variant: "destructive",
                       });
                       console.log("Alert published successfully.");
+                      })();
                     };
                     img.onerror = (e) => {
                       console.error("Failed to load alert image for annotation", e);
                     };
                   } else {
                     console.warn("Skipping alert: Media or Captured Image missing.");
+                    alertPublishedForEventRef.current = false;
                   }
-                } else {
-                  console.log(`Alert skipped: Cooldown active (${Date.now() - lastAlertTimeRef.current}ms since last)`);
                 }
+              } else if (rawFinal.length > 0) {
+                setDetectionResult(`Monitoring... (${consensusCount}/${CONSENSUS_THRESHOLD} frames)`);
               } else {
                 setDetectionResult("Monitoring Feed...");
               }
@@ -446,17 +604,23 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
     return () => window.removeEventListener('resize', handleResize);
   }, [detections, coordMode, drawBoundingBoxes, uploadedImage, uploadedVideo]);
 
-  // Notify parent once per upload so the emergency dashboard stays visible
+  // Notify parent once per upload (fallback if alert path didn't fire)
   useEffect(() => {
     if (detectionResult && detectionResult.includes('Detected') && !detectionResult.includes('No')) {
-      if (!accidentNotifiedRef.current) {
+      if (!accidentNotifiedRef.current && accidentLocationRef.current) {
         accidentNotifiedRef.current = true;
         let severity: "High" | "Medium" | "Low" = "Medium";
         const match = detectionResult.match(/\d{2}/);
         if (match && parseInt(match[0]) > 75) {
           severity = "High";
         }
-        onAccidentDetected?.({ videoFilename, severity });
+        const loc = accidentLocationRef.current;
+        onAccidentDetected?.({
+          videoFilename,
+          severity,
+          location: { location: loc.location, lat: loc.lat, lon: loc.lon },
+          locationSource: loc.source,
+        });
       }
     }
   }, [detectionResult, videoFilename, onAccidentDetected]);
@@ -563,6 +727,12 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
     if (!file) return;
     setVideoFilename(file.name);
     accidentNotifiedRef.current = false;
+    alertPublishedForEventRef.current = false;
+    postureLockedRef.current = false;
+    lastPostureRef.current = null;
+    setPostureResult(null);
+    accidentLocationRef.current = null;
+    setActiveLocationLabel(null);
     onAccidentReset?.();
     const isVideo = file.type.startsWith('video/');
     if (isVideo) {
@@ -640,12 +810,71 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
           )}
         </div>
 
+        {/* Accident Location */}
+        <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <Label className="flex items-center gap-2 text-blue-800 font-semibold text-sm">
+              <MapPin className="h-4 w-4" />
+              Accident Location
+            </Label>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleUseGps}
+              disabled={gpsLoading}
+              className="gap-1 border-blue-300 text-blue-700"
+            >
+              <LocateFixed className="h-3.5 w-3.5" />
+              {gpsLoading ? "Getting GPS..." : "Use My GPS"}
+            </Button>
+          </div>
+          <Input
+            placeholder="Location name (e.g. Kathipara Junction)"
+            value={locationName}
+            onChange={(e) => setLocationName(e.target.value)}
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <Input
+              placeholder="Latitude"
+              value={locationLat}
+              onChange={(e) => setLocationLat(e.target.value)}
+              type="number"
+              step="any"
+            />
+            <Input
+              placeholder="Longitude"
+              value={locationLng}
+              onChange={(e) => setLocationLng(e.target.value)}
+              type="number"
+              step="any"
+            />
+          </div>
+          <label className="flex items-center gap-2 text-xs text-blue-700 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={preferGps}
+              onChange={(e) => setPreferGps(e.target.checked)}
+              className="rounded"
+            />
+            Use GPS when coordinates are not entered (overrides demo video map)
+          </label>
+          {activeLocationLabel && (
+            <p className="text-xs text-blue-600 font-medium">Active: {activeLocationLabel}</p>
+          )}
+          {!locationLat && !locationLng && !preferGps && videoFilename && (
+            <p className="text-xs text-muted-foreground">
+              Demo video location will be used for {videoFilename}
+            </p>
+          )}
+        </div>
+
         {/* Sensitivity Control moved above buttons */}
         <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 space-y-2">
           <div className="flex items-center justify-between">
             <Label className="flex items-center gap-2 text-slate-700 font-semibold text-sm">
               <AlertTriangle className="h-4 w-4 text-amber-500" />
-              Sensitivity: {(threshold * 100).toFixed(0)}%
+              Sensitivity: {(threshold * 100).toFixed(0)}% (higher = fewer false alerts)
             </Label>
             <span className="text-[10px] text-slate-400 font-mono">
               {debugInfo || "Model Ready"}
@@ -666,7 +895,7 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
           </Badge>
         )}
 
-        {postureResult && detections.length > 0 && (
+        {postureResult && detections.length > 0 && isMeaningfulPosture(postureResult) && (
           <PostureAnalysisDisplay posture={postureResult} />
         )}
 

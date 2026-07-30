@@ -4,8 +4,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Ambulance, Clock, Users, MapPin, AlertCircle, Navigation } from "lucide-react";
 import { useAccidentAlerts } from "@/hooks/use-accident-alerts";
+import { useRefreshDynamicHospitals } from "@/hooks/useRefreshDynamicHospitals";
 import OptimizedRoutePanel from "@/components/OptimizedRoutePanel";
-import PostureAnalysisDisplay from "@/components/PostureAnalysisDisplay";
 import { getPostureRiskColor, getPostureStatusColor, resolveAlertSeverity } from "@/lib/postureAnalysis";
 
 const getSeverityColor = (severity: "Low" | "Medium" | "High" | "Critical") => {
@@ -31,6 +31,7 @@ const getStatusColor = (status: "Ambulance Dispatched" | "Pending") => {
 
 const HospitalDashboard = () => {
   const storedAlerts = useAccidentAlerts();
+  useRefreshDynamicHospitals(storedAlerts);
   const [expandedRouteId, setExpandedRouteId] = useState<string | null>(null);
 
   // Convert stored alerts to display format
@@ -48,6 +49,15 @@ const HospitalDashboard = () => {
       location: a.location,
       new: a.isNew,
       assignedHospital: a.assignedHospital,
+      assignedHospitalLat: a.assignedHospitalLat,
+      assignedHospitalLng: a.assignedHospitalLng,
+      assignedHospitalAddress: a.assignedHospitalAddress,
+      hospitalMapsUrl: a.hospitalMapsUrl,
+      isHospitalRegistered: a.isHospitalRegistered,
+      integrationMessage: a.integrationMessage,
+      routeDistanceKm: a.routeDistanceKm,
+      etaMinutes: a.etaMinutes,
+      routePolyline: a.routePolyline,
       assignedPoliceStation: a.assignedPoliceStation,
       photoDataUrl: a.photoDataUrl,
       confidence: a.confidence,
@@ -266,6 +276,11 @@ const HospitalDashboard = () => {
                         <div>
                           <p className="text-sm text-muted-foreground">Assigned Hospital</p>
                           <p className="font-semibold text-sm">{accident.assignedHospital}</p>
+                          {accident.isHospitalRegistered && accident.integrationMessage && (
+                            <p className="text-xs mt-1 text-green-600">
+                              {accident.integrationMessage}
+                            </p>
+                          )}
                         </div>
                       )}
                       {accident.assignedPoliceStation && (
@@ -275,9 +290,6 @@ const HospitalDashboard = () => {
                         </div>
                       )}
                     </div>
-                  )}
-                  {accident.postureAnalysis && (
-                    <PostureAnalysisDisplay posture={accident.postureAnalysis} />
                   )}
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t">
                     <Badge className={getStatusColor(accident.status)}>
@@ -308,7 +320,17 @@ const HospitalDashboard = () => {
                         location: accident.location,
                         lat: accident.lat,
                         lng: accident.lng,
+                        severity: accident.severity,
                         assignedHospital: accident.assignedHospital,
+                        assignedHospitalLat: accident.assignedHospitalLat,
+                        assignedHospitalLng: accident.assignedHospitalLng,
+                        assignedHospitalAddress: accident.assignedHospitalAddress,
+                        hospitalMapsUrl: accident.hospitalMapsUrl,
+                        isHospitalRegistered: accident.isHospitalRegistered,
+                        integrationMessage: accident.integrationMessage,
+                        routeDistanceKm: accident.routeDistanceKm,
+                        etaMinutes: accident.etaMinutes,
+                        routePolyline: accident.routePolyline,
                       }}
                     />
                   )}

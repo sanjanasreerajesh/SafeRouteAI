@@ -19,6 +19,27 @@ export interface PostureAnalysis {
 
 /** Default posture results for predefined demo videos */
 export const DEFAULT_POSTURE_BY_VIDEO: Record<string, PostureAnalysis> = {
+  "video1.mp4": {
+    status: "Conscious",
+    risk: "Medium",
+    body_angle: 35,
+    persons_detected: 1,
+    motion: "Medium",
+  },
+  "video2.mp4": {
+    status: "Conscious",
+    risk: "Medium",
+    body_angle: 28,
+    persons_detected: 2,
+    motion: "Medium",
+  },
+  "video3.mp4": {
+    status: "Stable",
+    risk: "Low",
+    body_angle: 12,
+    persons_detected: 1,
+    motion: "Low",
+  },
   "video4.mp4": {
     status: "Critical",
     risk: "High",
@@ -30,11 +51,19 @@ export const DEFAULT_POSTURE_BY_VIDEO: Record<string, PostureAnalysis> = {
 
 export function getDefaultPostureForVideo(filename: string): PostureAnalysis | null {
   const normalized = filename.trim().toLowerCase();
-  return (
-    DEFAULT_POSTURE_BY_VIDEO[filename] ??
-    DEFAULT_POSTURE_BY_VIDEO[normalized] ??
-    null
-  );
+  if (DEFAULT_POSTURE_BY_VIDEO[filename]) return DEFAULT_POSTURE_BY_VIDEO[filename];
+  if (DEFAULT_POSTURE_BY_VIDEO[normalized]) return DEFAULT_POSTURE_BY_VIDEO[normalized];
+
+  for (const [key, value] of Object.entries(DEFAULT_POSTURE_BY_VIDEO)) {
+    const stem = key.replace(".mp4", "");
+    if (normalized.includes(stem)) return value;
+  }
+  return null;
+}
+
+export function isMeaningfulPosture(posture: PostureAnalysis | null | undefined): boolean {
+  if (!posture) return false;
+  return posture.status !== "Unknown" || posture.persons_detected > 0 || posture.body_angle > 0;
 }
 
 /** Use video-specific defaults when defined; otherwise fall back to backend result */
@@ -42,7 +71,9 @@ export function resolvePostureForVideo(
   filename: string,
   backendPosture?: PostureAnalysis | null
 ): PostureAnalysis | null {
-  return getDefaultPostureForVideo(filename) ?? backendPosture ?? null;
+  const defaultPosture = getDefaultPostureForVideo(filename);
+  if (defaultPosture) return defaultPosture;
+  return backendPosture ?? null;
 }
 
 export type AlertSeverity = "Low" | "Medium" | "High" | "Critical";

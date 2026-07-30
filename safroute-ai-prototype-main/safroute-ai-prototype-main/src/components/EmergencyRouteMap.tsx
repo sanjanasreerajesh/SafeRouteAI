@@ -3,7 +3,8 @@ import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from "react-
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import type { RouteResult } from "@/lib/routeOptimizer";
-import type { LocationData, HospitalRecommendation } from "@/lib/emergencyResponse";
+import type { LocationData } from "@/lib/emergencyResponse";
+import type { MapHospital } from "@/lib/dynamicEmergency";
 import { formatEta } from "@/lib/routeOptimizer";
 
 // Fix Leaflet default icon paths in bundled apps
@@ -32,12 +33,29 @@ const hospitalIcon = new L.Icon({
   shadowSize: [41, 41],
 });
 
+const nearbyHospitalIcon = new L.Icon({
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png",
+  shadowUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png",
+  iconSize: [22, 36],
+  iconAnchor: [11, 36],
+  popupAnchor: [1, -30],
+  shadowSize: [36, 36],
+});
+
 const ambulanceIcon = L.divIcon({
   html: '<div style="font-size:28px;line-height:1;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.4))">🚑</div>',
   className: "bg-transparent border-0",
   iconSize: [32, 32],
   iconAnchor: [16, 16],
 });
+
+export interface MapHospitalTarget {
+  name: string;
+  lat: number;
+  lon: number;
+  dist?: number;
+  address?: string;
+}
 
 function FitRouteBounds({ positions }: { positions: [number, number][] }) {
   const map = useMap();
@@ -95,12 +113,14 @@ function AmbulanceAnimator({ polyline }: { polyline: [number, number][] }) {
 
 interface EmergencyRouteMapProps {
   accidentLocation: LocationData;
-  hospital: HospitalRecommendation;
+  hospital: MapHospitalTarget;
   route: RouteResult | null;
   loading: boolean;
   height?: number;
   showAmbulanceAnimation?: boolean;
   mapActive?: boolean;
+  /** Additional nearby hospitals to show as markers */
+  nearbyHospitals?: MapHospital[];
 }
 
 const EmergencyRouteMap = ({
@@ -111,6 +131,7 @@ const EmergencyRouteMap = ({
   height = 300,
   showAmbulanceAnimation = false,
   mapActive = true,
+  nearbyHospitals = [],
 }: EmergencyRouteMapProps) => {
   const [mounted, setMounted] = useState(false);
 
@@ -132,6 +153,8 @@ const EmergencyRouteMap = ({
   const eta = route?.etaMinutes;
   const isOptimized = route && !route.isFallback;
 
+  const otherHospitals = nearbyHospitals.filter((h) => h.name !== hospital.name);
+
   return (
     <div className="relative">
       <div
@@ -140,7 +163,7 @@ const EmergencyRouteMap = ({
       >
         {mounted ? (
         <MapContainer
-          key={`${accidentLocation.lat}-${accidentLocation.lon}-${hospital.name}-${polyline.length}`}
+          key={`${accidentLocation.lat}-${accidentLocation.lon}-${hospital.name}-${polyline.length}-${otherHospitals.length}`}
           center={[accidentLocation.lat, accidentLocation.lon]}
           zoom={12}
           scrollWheelZoom={true}
@@ -152,6 +175,8 @@ const EmergencyRouteMap = ({
           />
           <FitRouteBounds positions={polyline} />
           <MapResizeFix active={mapActive} />
+
+          {/* Accident marker */}
           <Marker position={[accidentLocation.lat, accidentLocation.lon]} icon={accidentIcon}>
             <Popup>
               <strong>🚨 Accident Location</strong>
@@ -159,15 +184,35 @@ const EmergencyRouteMap = ({
               {accidentLocation.location}
             </Popup>
           </Marker>
+
+          {/* Selected hospital marker */}
           <Marker position={[hospital.lat, hospital.lon]} icon={hospitalIcon}>
             <Popup>
               <strong>🏥 {hospital.name}</strong>
               <br />
+              {hospital.address && <>{hospital.address}<br /></>}
               {drivingDistance != null && <>Distance: {drivingDistance.toFixed(1)} km<br /></>}
               {eta != null && <>ETA: {formatEta(eta)}</>}
             </Popup>
           </Marker>
-          {/* Highlighted route — glow underlay + main line */}
+
+          {/* Other nearby hospitals */}
+          {otherHospitals.map((h) => (
+            <Marker
+              key={`${h.name}-${h.lat}`}
+              position={[h.lat, h.lon]}
+              icon={nearbyHospitalIcon}
+            >
+              <Popup>
+                <strong>{h.name}</strong>
+                <br />
+                {h.distanceKm != null && <>{h.distanceKm.toFixed(1)} km<br /></>}
+                {h.etaMinutes != null && <>ETA: {formatEta(h.etaMinutes)}</>}
+              </Popup>
+            </Marker>
+          ))}
+
+          {/* Route polyline */}
           {isOptimized && (
             <Polyline positions={polyline} color="#93c5fd" weight={10} opacity={0.5} />
           )}

@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Navigation, Clock, Hospital, MapPin } from "lucide-react";
+import { Navigation, Clock, Hospital, MapPin, ExternalLink } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -8,23 +8,17 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
-import { getHospitalByName, type LocationData } from "@/lib/emergencyResponse";
+import { Button } from "@/components/ui/button";
+import { type LocationData } from "@/lib/emergencyResponse";
 import { useEmergencyRoute } from "@/hooks/useEmergencyRoute";
 import { formatEta } from "@/lib/routeOptimizer";
 import EmergencyRouteMap from "@/components/EmergencyRouteMap";
-
-export interface RouteModalAccident {
-  id: string;
-  location: string;
-  lat: number;
-  lng: number;
-  assignedHospital: string;
-}
+import type { RoutePanelAccident } from "@/components/OptimizedRoutePanel";
 
 interface OptimizedRouteModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  accident: RouteModalAccident | null;
+  accident: RoutePanelAccident | null;
 }
 
 const OptimizedRouteModal = ({ open, onOpenChange, accident }: OptimizedRouteModalProps) => {
@@ -32,32 +26,50 @@ const OptimizedRouteModal = ({ open, onOpenChange, accident }: OptimizedRouteMod
     ? { location: accident.location, lat: accident.lat, lon: accident.lng }
     : null;
 
-  const hospital = useMemo(
-    () => (accident ? getHospitalByName(accident.assignedHospital) : null),
-    [accident]
-  );
+  const hasCoords =
+    accident?.assignedHospitalLat != null && accident?.assignedHospitalLng != null;
 
   const routeSource = accidentLocation
     ? { lat: accidentLocation.lat, lon: accidentLocation.lon }
     : null;
 
-  const routeDestination = hospital
-    ? { lat: hospital.lat, lon: hospital.lon, name: hospital.name }
-    : null;
+  const routeDestination =
+    hasCoords && accident
+      ? {
+          lat: accident.assignedHospitalLat!,
+          lon: accident.assignedHospitalLng!,
+          name: accident.assignedHospital,
+        }
+      : null;
 
-  const { route, loading } = useEmergencyRoute(
-    open ? routeSource : null,
+  const { route: fetchedRoute, loading } = useEmergencyRoute(
+    open && hasCoords ? routeSource : null,
     open ? routeDestination : null
   );
 
-  const hospitalForMap = hospital
-    ? {
-        ...hospital,
-        dist: route?.distanceKm ?? 0,
-        score: 0,
-        isClosestSuitable: false,
-      }
-    : null;
+  const route = useMemo(() => {
+    if (accident?.routePolyline && accident.routePolyline.length >= 2) {
+      return {
+        hospitalName: accident.assignedHospital,
+        distanceKm: accident.routeDistanceKm ?? 0,
+        etaMinutes: accident.etaMinutes ?? 0,
+        polyline: accident.routePolyline,
+        isFallback: false,
+      };
+    }
+    return fetchedRoute;
+  }, [accident, fetchedRoute]);
+
+  const hospitalForMap =
+    hasCoords && accident
+      ? {
+          name: accident.assignedHospital,
+          lat: accident.assignedHospitalLat!,
+          lon: accident.assignedHospitalLng!,
+          dist: route?.distanceKm ?? accident.routeDistanceKm ?? 0,
+          address: accident.assignedHospitalAddress,
+        }
+      : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -77,9 +89,9 @@ const OptimizedRouteModal = ({ open, onOpenChange, accident }: OptimizedRouteMod
         </DialogHeader>
 
         <div className="p-6 space-y-4">
-          {!hospital ? (
+          {!hasCoords ? (
             <p className="text-sm text-muted-foreground text-center py-8">
-              Hospital coordinates not found for &quot;{accident?.assignedHospital}&quot;.
+              Hospital coordinates not available for &quot;{accident?.assignedHospital}&quot;.
             </p>
           ) : accidentLocation && hospitalForMap ? (
             <>
@@ -90,7 +102,7 @@ const OptimizedRouteModal = ({ open, onOpenChange, accident }: OptimizedRouteMod
                 </Badge>
                 <Badge variant="outline" className="gap-1 py-1.5 px-3">
                   <Hospital className="h-3.5 w-3.5 text-green-600" />
-                  {hospital.name}
+                  {hospitalForMap.name}
                 </Badge>
                 {route && (
                   <>
@@ -111,6 +123,19 @@ const OptimizedRouteModal = ({ open, onOpenChange, accident }: OptimizedRouteMod
                   <Badge className="bg-blue-600 text-xs">Optimized route</Badge>
                 )}
               </div>
+
+              {accident?.isHospitalRegistered && accident?.integrationMessage && (
+                <p className="text-xs text-green-600">{accident.integrationMessage}</p>
+              )}
+
+              {accident?.hospitalMapsUrl && (
+                <Button variant="outline" size="sm" asChild className="gap-1.5">
+                  <a href={accident.hospitalMapsUrl} target="_blank" rel="noopener noreferrer">
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    Open in Google Maps
+                  </a>
+                </Button>
+              )}
 
             {open && (
               <EmergencyRouteMap

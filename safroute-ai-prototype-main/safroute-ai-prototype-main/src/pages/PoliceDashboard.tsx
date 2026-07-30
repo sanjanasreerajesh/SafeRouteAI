@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,11 +11,15 @@ import {
   CheckCircle2,
   XCircle,
   AlertCircle,
+  Navigation,
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAccidentAlerts } from "@/hooks/use-accident-alerts";
+import { useRefreshDynamicHospitals } from "@/hooks/useRefreshDynamicHospitals";
+import { useRefreshDynamicPolice } from "@/hooks/useRefreshDynamicPolice";
 import { markAlertNotNew as markNotNew } from "@/lib/accidentAlerts";
 import PostureAnalysisDisplay from "@/components/PostureAnalysisDisplay";
+import PoliceRoutePanel from "@/components/PoliceRoutePanel";
 import { getPostureRiskColor, getPostureStatusColor, resolveAlertSeverity } from "@/lib/postureAnalysis";
 
 const getSeverityColor = (severity: "Low" | "Medium" | "High" | "Critical") => {
@@ -48,7 +52,10 @@ const getTrafficStatusColor = (status: "Road Blocked" | "Diverted" | "Cleared") 
 
 const PoliceDashboard = () => {
   const storedAlerts = useAccidentAlerts();
+  useRefreshDynamicHospitals(storedAlerts);
+  useRefreshDynamicPolice(storedAlerts);
   const { toast } = useToast();
+  const [expandedRouteId, setExpandedRouteId] = useState<string | null>(null);
 
   // Convert stored alerts to display format
   const accidents = useMemo(() => {
@@ -67,6 +74,18 @@ const PoliceDashboard = () => {
       investigationStatus: a.investigationStatus,
       assignedHospital: a.assignedHospital,
       assignedPoliceStation: a.assignedPoliceStation,
+      assignedPoliceLat: a.assignedPoliceLat,
+      assignedPoliceLng: a.assignedPoliceLng,
+      assignedPoliceAddress: a.assignedPoliceAddress,
+      assignedPolicePhone: a.assignedPolicePhone,
+      policeMapsUrl: a.policeMapsUrl,
+      isPoliceRegistered: a.isPoliceRegistered,
+      policeIntegrationMessage: a.policeIntegrationMessage,
+      policeSelectionReason: a.policeSelectionReason,
+      policeRouteDistanceKm: a.policeRouteDistanceKm,
+      policeEtaMinutes: a.policeEtaMinutes,
+      policeRoutePolyline: a.policeRoutePolyline,
+      alertId: a.id,
       photoDataUrl: a.photoDataUrl,
       isNew: a.isNew,
       confidence: a.confidence,
@@ -295,6 +314,17 @@ const PoliceDashboard = () => {
                         <div>
                           <p className="text-sm text-muted-foreground">Assigned Police</p>
                           <p className="font-semibold text-sm">{accident.assignedPoliceStation}</p>
+                          {accident.policeIntegrationMessage && (
+                            <p
+                              className={`text-xs mt-1 ${
+                                accident.isPoliceRegistered
+                                  ? "text-green-600"
+                                  : "text-amber-600"
+                              }`}
+                            >
+                              {accident.policeIntegrationMessage}
+                            </p>
+                          )}
                         </div>
                       )}
                       {accident.assignedHospital && (
@@ -308,10 +338,55 @@ const PoliceDashboard = () => {
                   {accident.postureAnalysis && (
                     <PostureAnalysisDisplay posture={accident.postureAnalysis} />
                   )}
-                  <div className="flex items-center justify-between pt-2 border-t">
+                  <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t">
                     <Badge className={getTrafficStatusColor(accident.trafficStatus)}>
                       {accident.trafficStatus}
                     </Badge>
+                    <div className="flex flex-wrap gap-2">
+                      {accident.assignedPoliceStation && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-2 border-violet-200 text-violet-700 hover:bg-violet-50 dark:border-violet-900 dark:text-violet-400"
+                          onClick={() =>
+                            setExpandedRouteId(
+                              expandedRouteId === accident.id ? null : accident.id
+                            )
+                          }
+                        >
+                          <Navigation className="h-4 w-4" />
+                          {expandedRouteId === accident.id ? "Hide Route" : "View Police Route"}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  {expandedRouteId === accident.id && (
+                    <PoliceRoutePanel
+                      accident={{
+                        id: accident.id,
+                        location: accident.location,
+                        lat: accident.lat,
+                        lng: accident.lng,
+                        severity: accident.severity,
+                        assignedPoliceStation: accident.assignedPoliceStation,
+                        assignedPoliceLat: accident.assignedPoliceLat,
+                        assignedPoliceLng: accident.assignedPoliceLng,
+                        assignedPoliceAddress: accident.assignedPoliceAddress,
+                        assignedPolicePhone: accident.assignedPolicePhone,
+                        policeMapsUrl: accident.policeMapsUrl,
+                        isPoliceRegistered: accident.isPoliceRegistered,
+                        policeIntegrationMessage: accident.policeIntegrationMessage,
+                        policeSelectionReason: accident.policeSelectionReason,
+                        policeRouteDistanceKm: accident.policeRouteDistanceKm,
+                        policeEtaMinutes: accident.policeEtaMinutes,
+                        policeRoutePolyline: accident.policeRoutePolyline,
+                      }}
+                    />
+                  )}
+
+                  <div className="flex items-center justify-between pt-2 border-t">
                     <Badge
                       variant={
                         accident.investigationStatus === "Completed"

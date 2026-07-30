@@ -2,23 +2,50 @@ import cv2
 import numpy as np
 import base64
 import json
+import os
+from contextlib import asynccontextmanager
+
 import onnxruntime as ort
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from database.session import init_db
+from notifications.websocket_manager import hospital_ws_manager
+from notifications.police_websocket_manager import police_ws_manager
 from posture_analysis import PostureAnalyzer, POSTURE_ENABLED
+from routers.detect_accident import router as detect_accident_router
+from routers.hospital_registry import router as hospital_registry_router
+from routers.nearest_police import router as nearest_police_router
+from routers.police_registry import router as police_registry_router
+
+load_dotenv()
 
 # ================= CONFIG =================
 IMG_SIZE = 640
-CONF_THRES = 0.6
+CONF_THRES = 0.70
 IOU_THRES = 0.45
 ACCIDENT_CLASS_ID = 0
+MIN_BOX_AREA_RATIO = 0.008  # ignore tiny boxes (common false positives)
 
 # 🔑 TEMPORAL CONFIRMATION (IMPORTANT)
-ACCIDENT_CONFIRM_FRAMES = 6   # ~0.5 sec at ~12 FPS
+ACCIDENT_CONFIRM_FRAMES = 10   # ~1 sec at ~10 FPS — reduces false positives
 
 # ================= FASTAPI =================
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize database tables on startup."""
+    init_db()
+    print("Database initialized")
+    yield
+
+
+app = FastAPI(title="SafeRoute AI", lifespan=lifespan)
+
+app.include_router(detect_accident_router)
+app.include_router(hospital_registry_router)
+app.include_router(nearest_police_router)
+app.include_router(police_registry_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,7 +63,7 @@ input_name = session.get_inputs()[0].name
 print("ONNX model loaded:", MODEL_PATH)
 
 # ================= GLOBAL STATE =================
-accident_frame_counter = 0
+# (per-connection state lives inside websocket_endpoint)
 
 # ================= UTILITIES =================
 def letterbox(img, new_shape=(640, 640)):
@@ -79,10 +106,51 @@ async def health():
         "output_shape": session.get_outputs()[0].shape
     }
 
+
+@app.get("/api/geocode/reverse")
+async def reverse_geocode(lat: float, lon: float):
+    """Reverse geocode coordinates to a human-readable place name."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = (
+        f"https://nominatim.openstreetmap.org/reverse?"
+        f"lat={lat}&lon={lon}&format=json&addressdetails=1&zoom=18"
+    )
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "SafRoute-AccidentDetection/1.0", "Accept-Language": "en"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        print(f"Reverse geocode failed: {exc}")
+        return {"location": f"{lat:.4f}, {lon:.4f}", "lat": lat, "lon": lon}
+
+    location = data.get("display_name")
+    if not location:
+        addr = data.get("address", {})
+        parts = [
+            addr.get("road") or addr.get("pedestrian") or addr.get("footway"),
+            addr.get("suburb") or addr.get("neighbourhood") or addr.get("quarter"),
+            addr.get("city") or addr.get("town") or addr.get("village") or addr.get("county"),
+            addr.get("state"),
+        ]
+        location = ", ".join(p for p in parts if p)
+
+    return {
+        "location": location or f"{lat:.4f}, {lon:.4f}",
+        "lat": lat,
+        "lon": lon,
+    }
+
 # ================= WEBSOCKET =================
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    global accident_frame_counter
+    accident_frame_counter = 0
+    posture_sent_for_event = False
     posture_analyzer = PostureAnalyzer() if POSTURE_ENABLED else None
     await websocket.accept()
     print("WebSocket connected")
@@ -108,6 +176,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             h, w = frame.shape[:2]
+            frame_area = h * w
+            client_threshold = float(data.get("threshold", CONF_THRES))
+            effective_thres = max(CONF_THRES, client_threshold)
 
             input_tensor, ratio, dw, dh = preprocess(frame)
             preds = session.run(None, {input_name: input_tensor})[0]
@@ -126,7 +197,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 if class_id != ACCIDENT_CLASS_ID:
                     continue
-                if confidence < CONF_THRES:
+                if confidence < effective_thres:
                     continue
 
                 # ---- BBOX RESTORATION ----
@@ -155,6 +226,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 if x2 <= x1 or y2 <= y1:
                     continue
 
+                box_area = (x2 - x1) * (y2 - y1)
+                if box_area < frame_area * MIN_BOX_AREA_RATIO:
+                    continue
+
                 boxes.append([x1, y1, x2 - x1, y2 - y1])
                 scores.append(confidence)
 
@@ -165,11 +240,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 accident_frame_counter += 1
             else:
                 accident_frame_counter = 0
+                posture_sent_for_event = False
 
             # 🚨 Confirm accident only after N frames
             if accident_frame_counter >= ACCIDENT_CONFIRM_FRAMES:
                 indices = cv2.dnn.NMSBoxes(
-                    boxes, scores, CONF_THRES, IOU_THRES
+                    boxes, scores, effective_thres, IOU_THRES
                 )
 
                 if len(indices) > 0:
@@ -185,20 +261,28 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
             else:
                 detections = []  # ❌ suppress early detections
+                posture_sent_for_event = False
                 if posture_analyzer:
                     posture_analyzer.reset()
 
-            # Posture analysis on confirmed accident (optional, non-breaking)
+            # Posture analysis only on the first confirmed frame (one per accident event)
             response = {"detections": detections}
-            if detections and posture_analyzer is not None:
+            if (
+                detections
+                and posture_analyzer is not None
+                and not posture_sent_for_event
+                and accident_frame_counter == ACCIDENT_CONFIRM_FRAMES
+            ):
                 best = max(detections, key=lambda d: d["confidence"])
                 x, y, bw, bh = best["x"], best["y"], best["width"], best["height"]
-                crop = frame[y : y + bh, x : x + bw]
-                if crop.size > 0:
-                    posture_result = posture_analyzer.analyze_posture(crop)
-                    response["posture"] = posture_result
-                    response["accident"] = True
-                    response["confidence"] = best["confidence"]
+                posture_result = posture_analyzer.analyze_posture(
+                    frame, bbox=(x, y, bw, bh)
+                )
+                response["posture"] = posture_result
+                response["accident"] = True
+                response["confidence"] = best["confidence"]
+                response["posture_final"] = True
+                posture_sent_for_event = True
 
             await websocket.send_json(response)
 
@@ -206,6 +290,36 @@ async def websocket_endpoint(websocket: WebSocket):
         print("WebSocket disconnected")
     except Exception as e:
         print("WebSocket error:", e)
+
+
+# ================= HOSPITAL WEBSOCKET (real-time alerts) =================
+@app.websocket("/ws/hospital/{registry_id}")
+async def hospital_alert_websocket(websocket: WebSocket, registry_id: str):
+    """Registered hospitals connect here to receive live accident alerts."""
+    await hospital_ws_manager.connect(registry_id, websocket)
+    print(f"Hospital WebSocket connected: {registry_id}")
+    try:
+        while True:
+            # Keep connection alive; hospitals may send acks
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        hospital_ws_manager.disconnect(registry_id, websocket)
+        print(f"Hospital WebSocket disconnected: {registry_id}")
+
+
+# ================= POLICE WEBSOCKET (real-time alerts) =================
+@app.websocket("/ws/police/{registry_id}")
+async def police_alert_websocket(websocket: WebSocket, registry_id: str):
+    """Registered police stations connect here to receive live accident alerts."""
+    await police_ws_manager.connect(registry_id, websocket)
+    print(f"Police WebSocket connected: {registry_id}")
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        police_ws_manager.disconnect(registry_id, websocket)
+        print(f"Police WebSocket disconnected: {registry_id}")
+
 
 # ================= RUN =================
 if __name__ == "__main__":

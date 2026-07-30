@@ -19,9 +19,10 @@ import numpy as np
 POSTURE_ENABLED = os.environ.get("POSTURE_ENABLED", "true").lower() != "false"
 
 HISTORY_SIZE = 15
-CONSECUTIVE_THRESHOLD = 10
-MOTIONLESS_FRAMES = 8
+CONSECUTIVE_THRESHOLD = 6
+MOTIONLESS_FRAMES = 6
 MOTION_THRESHOLD = 0.015
+BBOX_PAD_RATIO = 1.0
 
 # MediaPipe landmark indices
 NOSE = 0
@@ -71,9 +72,9 @@ def _init_mediapipe():
             base_options=base_opts.BaseOptions(model_asset_path=model_path),
             running_mode=vision.RunningMode.IMAGE,
             num_poses=5,
-            min_pose_detection_confidence=0.4,
-            min_pose_presence_confidence=0.4,
-            min_tracking_confidence=0.4,
+            min_pose_detection_confidence=0.25,
+            min_pose_presence_confidence=0.25,
+            min_tracking_confidence=0.25,
         )
         _pose_landmarker = vision.PoseLandmarker.create_from_options(options)
         _mediapipe_available = True
@@ -146,6 +147,27 @@ def _classify_single_pose(landmarks, body_angle: float) -> str:
     return "Conscious"
 
 
+def _expand_bbox_crop(
+    frame: np.ndarray,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    pad_ratio: float = BBOX_PAD_RATIO,
+) -> np.ndarray:
+    """Expand accident bbox to include nearby persons (often outside tight YOLO box)."""
+    fh, fw = frame.shape[:2]
+    pad_w = int(w * pad_ratio)
+    pad_h = int(h * pad_ratio)
+    x1 = max(0, x - pad_w)
+    y1 = max(0, y - pad_h)
+    x2 = min(fw, x + w + pad_w)
+    y2 = min(fh, y + h + pad_h)
+    if x2 <= x1 or y2 <= y1:
+        return frame
+    return frame[y1:y2, x1:x2]
+
+
 def _detect_poses_in_crop(crop_bgr: np.ndarray) -> List[Dict[str, Any]]:
     """Run MediaPipe Pose Landmarker on accident crop."""
     _init_mediapipe()
@@ -169,8 +191,8 @@ def _detect_poses_in_crop(crop_bgr: np.ndarray) -> List[Dict[str, Any]]:
     for landmarks in result.pose_landmarks:
         key_points = [landmarks[NOSE], landmarks[LEFT_SHOULDER], landmarks[RIGHT_SHOULDER],
                       landmarks[LEFT_HIP], landmarks[RIGHT_HIP]]
-        visible_count = sum(1 for p in key_points if _visible(p, 0.3))
-        if visible_count < 3:
+        visible_count = sum(1 for p in key_points if _visible(p, 0.2))
+        if visible_count < 2:
             continue
 
         sh_mid = _midpoint(landmarks[LEFT_SHOULDER], landmarks[RIGHT_SHOULDER])
@@ -234,9 +256,17 @@ class PostureAnalyzer:
         self.confirmed_status: str = "Unknown"
         self.motionless_counter: int = 0
 
-    def analyze_posture(self, accident_crop: np.ndarray) -> Dict[str, Any]:
+    def analyze_posture(
+        self,
+        frame: np.ndarray,
+        bbox: Optional[Tuple[int, int, int, int]] = None,
+    ) -> Dict[str, Any]:
         """
-        Analyze posture in a cropped accident region.
+        Analyze posture in an accident region.
+
+        Args:
+            frame: Full BGR frame or pre-cropped accident region.
+            bbox: Optional (x, y, width, height) to expand around accident box.
 
         Returns:
             { status, risk, body_angle, persons_detected, motion }
@@ -244,10 +274,19 @@ class PostureAnalyzer:
         if not POSTURE_ENABLED:
             return self._unknown_result()
 
-        if accident_crop is None or accident_crop.size == 0:
+        if frame is None or frame.size == 0:
             return self._apply_temporal("Unknown", 0, 0, None)
 
-        persons = _detect_poses_in_crop(accident_crop)
+        persons: List[Dict[str, Any]] = []
+
+        if bbox is not None:
+            x, y, w, h = bbox
+            expanded = _expand_bbox_crop(frame, x, y, w, h)
+            persons = _detect_poses_in_crop(expanded)
+            if not persons:
+                persons = _detect_poses_in_crop(frame)
+        else:
+            persons = _detect_poses_in_crop(frame)
 
         if not persons:
             return self._apply_temporal("Unknown", 0, 0, None)
@@ -316,10 +355,13 @@ class PostureAnalyzer:
         self.motionless_counter = 0
 
 
-def analyze_posture(accident_crop: np.ndarray) -> Dict[str, Any]:
+def analyze_posture(
+    frame: np.ndarray,
+    bbox: Optional[Tuple[int, int, int, int]] = None,
+) -> Dict[str, Any]:
     """
     Stateless convenience wrapper (creates a new analyzer each call).
     Prefer PostureAnalyzer instance for temporal analysis across frames.
     """
     analyzer = PostureAnalyzer()
-    return analyzer.analyze_posture(accident_crop)
+    return analyzer.analyze_posture(frame, bbox=bbox)
