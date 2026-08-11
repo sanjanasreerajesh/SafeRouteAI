@@ -23,13 +23,13 @@ load_dotenv()
 
 # ================= CONFIG =================
 IMG_SIZE = 640
-CONF_THRES = 0.70
+CONF_THRES = 0.45
 IOU_THRES = 0.45
 ACCIDENT_CLASS_ID = 0
-MIN_BOX_AREA_RATIO = 0.008  # ignore tiny boxes (common false positives)
+MIN_BOX_AREA_RATIO = 0.005  # ignore tiny boxes (common false positives)
 
-# 🔑 TEMPORAL CONFIRMATION (IMPORTANT)
-ACCIDENT_CONFIRM_FRAMES = 10   # ~1 sec at ~10 FPS — reduces false positives
+# Temporal confirmation — require N consecutive frames before alerting
+ACCIDENT_CONFIRM_FRAMES = 5   # ~1 sec at ~5 FPS
 
 # ================= FASTAPI =================
 @asynccontextmanager
@@ -242,25 +242,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 accident_frame_counter = 0
                 posture_sent_for_event = False
 
-            # 🚨 Confirm accident only after N frames
-            if accident_frame_counter >= ACCIDENT_CONFIRM_FRAMES:
-                indices = cv2.dnn.NMSBoxes(
-                    boxes, scores, effective_thres, IOU_THRES
-                )
+            # Confirm accident only after N consecutive frames; send unconfirmed
+            # boxes meanwhile so the frontend can build frame consensus.
+            indices = cv2.dnn.NMSBoxes(
+                boxes, scores, effective_thres, IOU_THRES
+            ) if boxes else []
 
-                if len(indices) > 0:
-                    for i in indices.flatten():
-                        detections.append({
-                            "x": boxes[i][0],
-                            "y": boxes[i][1],
-                            "width": boxes[i][2],
-                            "height": boxes[i][3],
-                            "confidence": round(scores[i], 2),
-                            "class_id": ACCIDENT_CLASS_ID,
-                            "confirmed": True
-                        })
-            else:
-                detections = []  # ❌ suppress early detections
+            confirmed = accident_frame_counter >= ACCIDENT_CONFIRM_FRAMES
+
+            if len(indices) > 0:
+                for i in indices.flatten():
+                    detections.append({
+                        "x": boxes[i][0],
+                        "y": boxes[i][1],
+                        "width": boxes[i][2],
+                        "height": boxes[i][3],
+                        "confidence": round(scores[i], 2),
+                        "class_id": ACCIDENT_CLASS_ID,
+                        "confirmed": confirmed,
+                    })
+
+            if not confirmed:
                 posture_sent_for_event = False
                 if posture_analyzer:
                     posture_analyzer.reset()

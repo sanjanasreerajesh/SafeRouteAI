@@ -12,6 +12,7 @@ import Index from "./pages/Index";
 import NotFound from "./pages/NotFound";
 import HospitalDashboard from "./pages/HospitalDashboard";
 import PoliceDashboard from "./pages/PoliceDashboard";
+import AmbulanceDispatch from "./pages/AmbulanceDispatch";
 
 const queryClient = new QueryClient();
 
@@ -29,6 +30,7 @@ const App = () => (
           <Route element={<Layout><Analytics /></Layout>} path="/analytics" />
           <Route element={<Layout><HospitalDashboard /></Layout>} path="/hospital" />
           <Route element={<Layout><PoliceDashboard /></Layout>} path="/police" />
+          <Route element={<Layout><AmbulanceDispatch /></Layout>} path="/ambulance-dispatch" />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>

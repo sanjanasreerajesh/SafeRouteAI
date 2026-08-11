@@ -1,5 +1,5 @@
 import { NavLink } from "@/components/NavLink";
-import { LayoutDashboard, Bell, History, BarChart3, Ambulance, Shield } from "lucide-react";
+import { LayoutDashboard, Bell, History, BarChart3, Ambulance, Shield, Siren } from "lucide-react";
 import { useLocation } from "react-router-dom";
 import {
   Sidebar,
@@ -20,6 +20,7 @@ const navItems = [
   { to: "/alerts", label: "Alerts", icon: Bell },
   { to: "/history", label: "History", icon: History },
   { to: "/analytics", label: "Analytics", icon: BarChart3 },
+  { to: "/ambulance-dispatch", label: "Ambulance Dispatch", icon: Siren },
 ];
 
 export function AppSidebar() {

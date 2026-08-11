@@ -38,6 +38,7 @@ interface BoundingBox {
   height: number;
   confidence: number;
   label: string;
+  confirmed?: boolean;
 }
 
 // --- Helper Functions ---
@@ -84,10 +85,11 @@ const nms = (boxes: BoundingBox[], iouThreshold: number = 0.5): BoundingBox[] =>
 // -------------------------------------------------------------------------------
 
 const MAX_HISTORY = 8;
-const CONSENSUS_THRESHOLD = 5; // Must detect in 5/8 frames to alert
-const MIN_STABLE_FRAMES_VIDEO = 5;
+const CONSENSUS_THRESHOLD = 3; // Must detect in 3/8 frames to alert
+const MIN_STABLE_FRAMES_VIDEO = 3;
 const MIN_STABLE_FRAMES_IMAGE = 2;
-const MIN_BOX_AREA_RATIO = 0.008;
+const MIN_BOX_AREA_RATIO = 0.005;
+const EMPTY_FRAME_RESET = 12; // reset state after this many consecutive empty frames
 
 const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelProps) => {
   const { toast } = useToast();
@@ -103,7 +105,7 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
   const [originalImageSize, setOriginalImageSize] = useState<{ width: number; height: number } | null>(null);
 
   // Detection Threshold (Sensitivity) — higher = fewer false positives
-  const [threshold, setThreshold] = useState(0.75);
+  const [threshold, setThreshold] = useState(0.45);
 
   // Accident location (manual / GPS / video fallback)
   const [locationName, setLocationName] = useState("");
@@ -146,6 +148,7 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
   const lastCapturedImageRef = useRef<string | null>(null);
   const videoFilenameRef = useRef<string>("");
   const accidentNotifiedRef = useRef(false);
+  const emptyFrameCountRef = useRef(0);
 
   useEffect(() => {
     videoFilenameRef.current = videoFilename;
@@ -242,12 +245,17 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
                   }
                 }
               } else if (data.detections.length === 0) {
-                setPostureResult(null);
-                lastPostureRef.current = null;
-                postureLockedRef.current = false;
-                detectionHistory.current = [];
-                boxPersistence.current = [];
-                setDetections([]);
+                emptyFrameCountRef.current += 1;
+                if (emptyFrameCountRef.current >= EMPTY_FRAME_RESET) {
+                  setPostureResult(null);
+                  lastPostureRef.current = null;
+                  postureLockedRef.current = false;
+                  detectionHistory.current = [];
+                  boxPersistence.current = [];
+                  setDetections([]);
+                }
+              } else {
+                emptyFrameCountRef.current = 0;
               }
               const media = imageRef.current || videoRef.current;
               const isImageSource = !!imageRef.current;
@@ -259,17 +267,22 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
                   const conf = d.confidence ?? 0;
                   const area = d.width * d.height;
                   const minArea = naturalWidth * naturalHeight * MIN_BOX_AREA_RATIO;
-                  return conf >= threshold && d.confirmed !== false && area >= minArea;
+                  return conf >= threshold && area >= minArea;
                 })
-                .map((d: {x: number, y: number, width: number, height: number, confidence?: number}) => ({
+                .map((d: {x: number, y: number, width: number, height: number, confidence?: number, confirmed?: boolean}) => ({
                   ...d,
                   x: d.x,
                   y: d.y,
                   width: d.width,
                   height: d.height,
                   confidence: d.confidence ?? 0,
-                  label: 'Accident'
+                  label: 'Accident',
+                  confirmed: d.confirmed === true,
                 }));
+
+              if (rawFinal.length > 0) {
+                emptyFrameCountRef.current = 0;
+              }
 
               // Frame consensus — reduce single-frame false positives
               detectionHistory.current.push(rawFinal);
@@ -302,8 +315,9 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
 
               setDetections(stableBoxes);
 
-              // Alert only on stable + consensus + confirmed backend detections
-              const alertBoxes = hasConsensus ? stableBoxes : [];
+              // Alert only on stable + consensus + backend-confirmed detections
+              const confirmedBoxes = stableBoxes.filter((b) => b.confirmed === true);
+              const alertBoxes = hasConsensus ? confirmedBoxes : [];
 
               console.log(`Detections received: ${rawFinal.length}, Stable: ${stableBoxes.length}, Alert candidates: ${alertBoxes.length}`);
 
@@ -349,6 +363,8 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
 
                       console.log("Publishing alert to dashboards...");
                       void (async () => {
+                      const confidenceSeverity =
+                        maxConf > 0.8 ? "Critical" : maxConf > 0.7 ? "High" : "Medium";
                       const resolvedLocation = await resolveAccidentLocation({
                         manual: getManualLocationInput(),
                         useGps: preferGps && !getManualLocationInput(),
@@ -376,8 +392,6 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
                         videoFilenameRef.current,
                         lastPostureRef.current
                       );
-                      const confidenceSeverity =
-                        maxConf > 0.8 ? "Critical" : maxConf > 0.7 ? "High" : "Medium";
                       const locationLabel = resolvedLocation.location;
                       const eventKey = `${videoFilenameRef.current || "media"}:${locationLabel}`;
                       publishAccidentAlert({
