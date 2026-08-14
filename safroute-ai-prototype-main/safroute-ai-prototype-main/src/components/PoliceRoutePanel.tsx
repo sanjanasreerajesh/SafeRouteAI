@@ -27,6 +27,7 @@ export interface PoliceRoutePanelAccident {
   policeMapsUrl?: string;
   isPoliceRegistered?: boolean;
   policeIntegrationMessage?: string;
+  policeSelectionReason?: string;
   policeRouteDistanceKm?: number;
   policeEtaMinutes?: number;
   policeRoutePolyline?: [number, number][];

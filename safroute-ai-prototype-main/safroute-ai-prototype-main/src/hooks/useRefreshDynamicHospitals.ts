@@ -30,10 +30,18 @@ export function useRefreshDynamicHospitals(alerts: AccidentAlert[]) {
           );
           const nearest = result?.nearestHospital;
           if (!nearest) {
-            updateAccidentAlert(alert.id, {
-              assignedHospital: "No hospital found within 15 km",
-              integrationMessage: result?.integration?.message,
-            });
+            // Don't overwrite an already-valid hospital name with a hard
+            // failure — a refresh can legitimately fail transiently (e.g. the
+            // free Overpass/OSRM APIs rate-limiting a burst of near-identical
+            // lookups) even though the original detection already found one.
+            const hasExistingAssignment =
+              !!alert.assignedHospital && alert.assignedHospital !== "Searching…";
+            if (!hasExistingAssignment) {
+              updateAccidentAlert(alert.id, {
+                assignedHospital: "No hospital found within 15 km",
+                integrationMessage: result?.integration?.message,
+              });
+            }
             return;
           }
 

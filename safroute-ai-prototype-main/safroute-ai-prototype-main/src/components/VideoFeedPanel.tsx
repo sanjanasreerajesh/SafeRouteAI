@@ -374,18 +374,42 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
                       setActiveLocationLabel(
                         `${resolvedLocation.location} (${resolvedLocation.source.toUpperCase()})`
                       );
-                      const hospitalRec = await detectAccident(
-                        resolvedLocation.lat,
-                        resolvedLocation.lon,
-                        toApiSeverity(confidenceSeverity),
-                        resolvedLocation.location
-                      );
-                      const policeRec = await fetchNearestPolice(
-                        resolvedLocation.lat,
-                        resolvedLocation.lon,
-                        toPoliceApiSeverity(confidenceSeverity),
-                        resolvedLocation.location
-                      );
+
+                      // Emit the accident event to the rest of the UI (Emergency
+                      // Dashboard) immediately — don't wait on hospital/police
+                      // lookups to tell the frontend an accident was detected.
+                      if (!accidentNotifiedRef.current) {
+                        accidentNotifiedRef.current = true;
+                        let notifySeverity: "High" | "Medium" | "Low" = "Medium";
+                        if (maxConf > 0.75) notifySeverity = "High";
+                        onAccidentDetected?.({
+                          videoFilename: videoFilenameRef.current,
+                          severity: notifySeverity,
+                          location: {
+                            location: resolvedLocation.location,
+                            lat: resolvedLocation.lat,
+                            lon: resolvedLocation.lon,
+                          },
+                          locationSource: resolvedLocation.source,
+                        });
+                      }
+
+                      // Hospital and police lookups are independent of each other —
+                      // run them concurrently instead of blocking one on the other.
+                      const [hospitalRec, policeRec] = await Promise.all([
+                        detectAccident(
+                          resolvedLocation.lat,
+                          resolvedLocation.lon,
+                          toApiSeverity(confidenceSeverity),
+                          resolvedLocation.location
+                        ),
+                        fetchNearestPolice(
+                          resolvedLocation.lat,
+                          resolvedLocation.lon,
+                          toPoliceApiSeverity(confidenceSeverity),
+                          resolvedLocation.location
+                        ),
+                      ]);
                       const nearest = hospitalRec?.nearestHospital;
                       const nearestPolice = policeRec?.nearestPoliceStation;
                       const alertPosture = resolvePostureForVideo(
@@ -443,21 +467,8 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
                         postureAnalysis: alertPosture ?? undefined,
                       });
 
-                      if (!accidentNotifiedRef.current) {
-                        accidentNotifiedRef.current = true;
-                        let severity: "High" | "Medium" | "Low" = "Medium";
-                        if (maxConf > 0.75) severity = "High";
-                        onAccidentDetected?.({
-                          videoFilename: videoFilenameRef.current,
-                          severity,
-                          location: {
-                            location: resolvedLocation.location,
-                            lat: resolvedLocation.lat,
-                            lon: resolvedLocation.lon,
-                          },
-                          locationSource: resolvedLocation.source,
-                        });
-                      }
+                      // (onAccidentDetected already fired above, immediately after
+                      // location resolution — not delayed behind hospital/police calls.)
 
                       toast({
                         title: "🚨 Accident Alert Sent",
@@ -717,7 +728,10 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
 
   // Consolidant draw effect (already handled above)
 
-  const detectAccident = async () => {
+  // NOTE: named differently from the imported `detectAccident` (dynamicEmergency.ts)
+  // to avoid shadowing it — this local handler just sends the uploaded image frame
+  // over the detection WebSocket; it does not call the hospital-lookup API.
+  const verifyUploadedImage = async () => {
     if (!uploadedImage || !wsConnected) return;
     setIsDetecting(true);
     const img = new Image();
@@ -813,7 +827,7 @@ const VideoFeedPanel = ({ onAccidentDetected, onAccidentReset }: VideoFeedPanelP
             <Upload className="h-4 w-4 mr-2" /> Upload Media
           </Button>
           {uploadedImage && (
-            <Button onClick={detectAccident} disabled={isDetecting || !wsConnected} className="flex-1">
+            <Button onClick={verifyUploadedImage} disabled={isDetecting || !wsConnected} className="flex-1">
               {isDetecting ? "Detecting..." : <><Play className="h-4 w-4 mr-2" /> Verify Image</>}
             </Button>
           )}

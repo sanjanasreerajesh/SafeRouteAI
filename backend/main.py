@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import onnxruntime as ort
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
 from database.session import init_db
@@ -181,7 +182,10 @@ async def websocket_endpoint(websocket: WebSocket):
             effective_thres = max(CONF_THRES, client_threshold)
 
             input_tensor, ratio, dw, dh = preprocess(frame)
-            preds = session.run(None, {input_name: input_tensor})[0]
+            # Run ONNX inference in a worker thread so this CPU-bound call doesn't
+            # block the event loop (other WS connections / requests keep flowing).
+            outputs = await run_in_threadpool(session.run, None, {input_name: input_tensor})
+            preds = outputs[0]
             preds = np.squeeze(preds)
 
             boxes, scores = [], []
@@ -277,8 +281,9 @@ async def websocket_endpoint(websocket: WebSocket):
             ):
                 best = max(detections, key=lambda d: d["confidence"])
                 x, y, bw, bh = best["x"], best["y"], best["width"], best["height"]
-                posture_result = posture_analyzer.analyze_posture(
-                    frame, bbox=(x, y, bw, bh)
+                # MediaPipe pose inference is also CPU-bound — keep it off the event loop.
+                posture_result = await run_in_threadpool(
+                    posture_analyzer.analyze_posture, frame, bbox=(x, y, bw, bh)
                 )
                 response["posture"] = posture_result
                 response["accident"] = True

@@ -29,10 +29,18 @@ export function useRefreshDynamicPolice(alerts: AccidentAlert[]) {
           );
           const nearest = result?.nearestPoliceStation;
           if (!nearest) {
-            updateAccidentAlert(alert.id, {
-              assignedPoliceStation: "No police station found nearby",
-              policeIntegrationMessage: result?.integration?.message,
-            });
+            // Don't overwrite an already-valid police station with a hard
+            // failure — a refresh can legitimately fail transiently (e.g. the
+            // free Overpass/OSRM APIs rate-limiting a burst of near-identical
+            // lookups) even though the original detection already found one.
+            const hasExistingAssignment =
+              !!alert.assignedPoliceStation && alert.assignedPoliceStation !== "Searching…";
+            if (!hasExistingAssignment) {
+              updateAccidentAlert(alert.id, {
+                assignedPoliceStation: "No police station found nearby",
+                policeIntegrationMessage: result?.integration?.message,
+              });
+            }
             return;
           }
 
